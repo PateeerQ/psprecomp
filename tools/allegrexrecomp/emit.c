@@ -929,78 +929,230 @@ static void emit_imports(FILE *f, const a_analysis *an, const emit_opts *o) {
     }
 }
 
-int a_emit(const a_analysis *an, const emit_opts *o) {
+/* ---- output files -------------------------------------------------------- */
+
+/* Every generated file is written to a temporary and only replaced when its
+ * contents actually differ, so a re-emit that produces identical text leaves
+ * the file's timestamp alone and the build system rebuilds nothing. That is
+ * what makes splitting the corpus across translation units worth anything:
+ * without it, every re-emit touches every file and the build is full again. */
+static int files_differ(const char *a, const char *b) {
+    FILE *fa = fopen(a, "rb");
+    FILE *fb = fopen(b, "rb");
+    int differ = 1;
+
+    if (fa && fb) {
+        char ba[8192], bb[8192];
+        size_t na, nb;
+        do {
+            na = fread(ba, 1, sizeof ba, fa);
+            nb = fread(bb, 1, sizeof bb, fb);
+            if (na != nb || memcmp(ba, bb, na) != 0) goto done;
+        } while (na);
+        differ = 0;
+    }
+done:
+    if (fa) fclose(fa);
+    if (fb) fclose(fb);
+    return differ;
+}
+
+typedef struct {
+    FILE *f;
     char path[1024];
+    char tmp[1024];
+} outfile;
+
+static int out_open(outfile *of, const char *dir, const char *name) {
+    snprintf(of->path, sizeof of->path, "%s/%s", dir, name);
+    snprintf(of->tmp,  sizeof of->tmp,  "%s/%s.tmp", dir, name);
+    of->f = fopen(of->tmp, "w");
+    if (!of->f) { fprintf(stderr, "cannot write %s\n", of->tmp); return -1; }
+    return 0;
+}
+
+/* 1 if the file on disk changed, 0 if it was already up to date, -1 on error. */
+static int out_commit(outfile *of) {
+    fclose(of->f);
+    of->f = NULL;
+
+    if (!files_differ(of->tmp, of->path)) { remove(of->tmp); return 0; }
+
+    remove(of->path);
+    if (rename(of->tmp, of->path) != 0) {
+        fprintf(stderr, "cannot replace %s\n", of->path);
+        return -1;
+    }
+    return 1;
+}
+
+/* One translation unit per this many functions. A 2206-function module then
+ * lands in ~35 files rather than one 256,566-line .c, which is worth doing for
+ * three separate reasons: a unit that size needs MSVC's /bigobj to hold its
+ * sections at all, it compiles on exactly one core, and a one-line change to
+ * the emitter rebuilds all of it. Large translation units are also where
+ * compilers start miscompiling under optimisation, which is a bad place for a
+ * recompiler to live.
+ *
+ * ponytail: fixed chunk size, no tuning knob. Revisit only if link time starts
+ * to dominate the build, which is the failure mode of splitting too far. */
+#define FUNCS_PER_UNIT 64
+
+int a_emit(const a_analysis *an, const emit_opts *o) {
+    outfile of;
+    char name[256];
+    ectx c;
+    int nunits = an->nfuncs > 0
+               ? (an->nfuncs + FUNCS_PER_UNIT - 1) / FUNCS_PER_UNIT
+               : 1;
+    int changed = 0, files = 0, u, i;
+
+    of.f = NULL;
+    c.out = NULL;
+    c.an = an;
+    c.func = NULL;
+    c.is_label = (uint8_t *)calloc(an->nwords ? an->nwords : 1, 1);
+    c.is_slot  = (uint8_t *)calloc(an->nwords ? an->nwords : 1, 1);
+    c.entries = NULL;
+    c.nentries = c.centries = 0;
+    if (!c.is_label || !c.is_slot) goto fail;
+
+/* Commit the current output file, counting it, and bail out on an I/O error. */
+#define COMMIT()                                   \
+    do {                                           \
+        int r_ = out_commit(&of);                  \
+        if (r_ < 0) goto fail;                     \
+        changed += r_;                             \
+        files++;                                   \
+    } while (0)
 
     /* Header */
-    snprintf(path, sizeof path, "%s/%s_funcs.h", o->outdir, o->prefix);
-    FILE *h = fopen(path, "w");
-    if (!h) { fprintf(stderr, "cannot write %s\n", path); return -1; }
-    emit_header(h, an, o);
-    fclose(h);
+    snprintf(name, sizeof name, "%s_funcs.h", o->prefix);
+    if (out_open(&of, o->outdir, name) != 0) goto fail;
+    emit_header(of.f, an, o);
+    COMMIT();
 
     /* Imports */
-    snprintf(path, sizeof path, "%s/%s_imports.c", o->outdir, o->prefix);
-    FILE *im = fopen(path, "w");
-    if (!im) { fprintf(stderr, "cannot write %s\n", path); return -1; }
-    emit_imports(im, an, o);
-    fclose(im);
+    snprintf(name, sizeof name, "%s_imports.c", o->prefix);
+    if (out_open(&of, o->outdir, name) != 0) goto fail;
+    emit_imports(of.f, an, o);
+    COMMIT();
 
-    /* Functions */
-    snprintf(path, sizeof path, "%s/%s_funcs.c", o->outdir, o->prefix);
-    FILE *f = fopen(path, "w");
-    if (!f) { fprintf(stderr, "cannot write %s\n", path); return -1; }
+    /* Functions, split across units */
+    for (u = 0; u < nunits; u++) {
+        int lo = u * FUNCS_PER_UNIT;
+        int hi = lo + FUNCS_PER_UNIT;
+        if (hi > an->nfuncs) hi = an->nfuncs;
 
-    fprintf(f,
+        snprintf(name, sizeof name, "%s_funcs_%03d.c", o->prefix, u);
+        if (out_open(&of, o->outdir, name) != 0) goto fail;
+        c.out = of.f;
+
+        fprintf(of.f,
+            "/* Generated by allegrexrecomp -- do not edit.\n"
+            " *\n"
+            " * Module: %s   --   unit %d of %d, functions %d..%d of %d.\n"
+            " */\n"
+            "#include \"%s_funcs.h\"\n",
+            o->module ? o->module : "(unknown)", u + 1, nunits,
+            lo, hi > lo ? hi - 1 : lo, an->nfuncs, o->prefix);
+
+        for (i = lo; i < hi; i++) {
+            c.func = &an->funcs[i];
+            emit_function(&c, &an->funcs[i]);
+        }
+        COMMIT();
+    }
+
+    /* Registration, last: the interior labels it dispatches to are only known
+     * once every function has been emitted. They live in whichever unit their
+     * function landed in and the shared header cannot declare them (it is
+     * written before they exist), so this file declares the ones it uses. */
+    snprintf(name, sizeof name, "%s_register.c", o->prefix);
+    if (out_open(&of, o->outdir, name) != 0) goto fail;
+    fprintf(of.f,
         "/* Generated by allegrexrecomp -- do not edit.\n"
         " *\n"
-        " * Module: %s   --   %d functions, %llu instructions.\n"
+        " * Populate the dispatch table. Indirect calls -- function pointers,\n"
+        " * vtables, callbacks, switch tables -- resolve through this.\n"
         " */\n"
-        "#include \"%s_funcs.h\"\n",
-        o->module ? o->module : "(unknown)", an->nfuncs,
-        (unsigned long long)an->insns, o->prefix);
+        "#include \"%s_funcs.h\"\n\n",
+        o->prefix);
 
+    for (i = 0; i < c.nentries; i++)
+        fprintf(of.f, "void psp_at_%08X(void);\n", c.entries[i]);
+
+    fprintf(of.f, "\nvoid psp_recomp_register(void) {\n");
+    for (i = 0; i < an->nfuncs; i++)
+        fprintf(of.f, "    psp_register(0x%08Xu, psp_func_%08X);\n",
+                an->funcs[i].addr, an->funcs[i].addr);
+    /* Interior labels last, so a real function entry always wins a collision. */
+    for (i = 0; i < c.nentries; i++)
+        fprintf(of.f, "    psp_register_label(0x%08Xu, psp_at_%08X);\n",
+                c.entries[i], c.entries[i]);
+    fprintf(of.f, "}\n");
+    COMMIT();
+
+#undef COMMIT
+
+    free(c.is_label);
+    free(c.is_slot);
+    free(c.entries);
+
+    printf("wrote %s/%s_funcs_000..%03d.c  (%d functions, %d interior entries)\n",
+           o->outdir, o->prefix, nunits - 1, an->nfuncs, c.nentries);
+    printf("wrote %s/%s_funcs.h\n", o->outdir, o->prefix);
+    printf("wrote %s/%s_imports.c (%d imports)\n", o->outdir, o->prefix, an->nimports);
+    printf("wrote %s/%s_register.c\n", o->outdir, o->prefix);
+    printf("%d of %d files changed.\n", changed, files);
+    return 0;
+
+fail:
+    if (of.f) fclose(of.f);
+    free(c.is_label);
+    free(c.is_slot);
+    free(c.entries);
+    return -1;
+}
+
+int a_emit_one(const a_analysis *an, uint32_t addr, FILE *out) {
+    const a_func *fn = NULL;
+    uint32_t want = addr & ~3u;
     ectx c;
-    c.out = f;
+    int i;
+
+    /* An address that turns up in a trace is usually somewhere *inside* a
+     * function rather than at its entry -- a clobbered register, a frame that
+     * did not close. The ownership map names the owning function directly, so
+     * an interior address dumps the routine it belongs to instead of nothing. */
+    if (want >= an->base && want + 4 <= an->base + an->size && an->owner) {
+        uint32_t own = an->owner[(want - an->base) / 4];
+        if (own) want = own;
+    }
+
+    for (i = 0; i < an->nfuncs; i++)
+        if (an->funcs[i].addr == want) { fn = &an->funcs[i]; break; }
+    if (!fn) return -1;
+
+    if (want != (addr & ~3u))
+        fprintf(stderr, "0x%08X is inside psp_func_%08X\n", addr, want);
+
+    c.out = out;
     c.an = an;
+    c.func = fn;
     c.is_label = (uint8_t *)calloc(an->nwords ? an->nwords : 1, 1);
     c.is_slot  = (uint8_t *)calloc(an->nwords ? an->nwords : 1, 1);
     c.entries = NULL;
     c.nentries = c.centries = 0;
     if (!c.is_label || !c.is_slot) {
-        free(c.is_label); free(c.is_slot); fclose(f);
+        free(c.is_label); free(c.is_slot);
         return -1;
     }
 
-    for (int i = 0; i < an->nfuncs; i++) {
-        c.func = &an->funcs[i];
-        emit_function(&c, &an->funcs[i]);
-    }
-
-    /* Registration */
-    fprintf(f,
-        "\n/* ---------------------------------------------------------------\n"
-        " * Populate the dispatch table. Indirect calls -- function pointers,\n"
-        " * vtables, callbacks, switch tables — resolve through this.\n"
-        " * ------------------------------------------------------------- */\n"
-        "void psp_recomp_register(void) {\n");
-    for (int i = 0; i < an->nfuncs; i++)
-        fprintf(f, "    psp_register(0x%08Xu, psp_func_%08X);\n",
-                an->funcs[i].addr, an->funcs[i].addr);
-    /* Interior labels last, so a real function entry always wins a collision. */
-    for (int i = 0; i < c.nentries; i++)
-        fprintf(f, "    psp_register_label(0x%08Xu, psp_at_%08X);\n",
-                c.entries[i], c.entries[i]);
-    fprintf(f, "}\n");
+    emit_function(&c, fn);
 
     free(c.is_label);
     free(c.is_slot);
     free(c.entries);
-    fclose(f);
-
-    printf("wrote %s/%s_funcs.c   (%d functions, %d interior entries)\n",
-           o->outdir, o->prefix, an->nfuncs, c.nentries);
-    printf("wrote %s/%s_funcs.h\n", o->outdir, o->prefix);
-    printf("wrote %s/%s_imports.c (%d imports)\n", o->outdir, o->prefix, an->nimports);
     return 0;
 }

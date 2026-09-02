@@ -209,3 +209,48 @@ library, which means it is implemented, not emulated.
 - [ ] Save states, an SDL2 + Dear ImGui frontend, controller remapping —
       built on the runtime, kept behind an opt-in CMake option so the core
       stays dependency-free.
+
+## Cross-cutting — the build loop ✅
+
+Ideas taken from [jessicanataliagta/PSPRecomp](https://github.com/jessicanataliagta/PSPRecomp),
+an unrelated project that happens to share this one's name (C++20, in-tree game
+profiles, DX12; its first profile is GTA: Vice City Stories). Nothing of theirs
+is read, copied, or linked — the same posture [`docs/ORACLE.md`](docs/ORACLE.md)
+takes toward emulators. These were engineering observations about how they
+build, not about how they analyse.
+
+- [x] **Split the emitted corpus into translation units.** `a_emit` wrote one
+      `<prefix>_funcs.c`, which is why the build needed MSVC's `/bigobj`: a unit
+      that size cannot hold its own sections, compiles on one core, and rebuilds
+      in full for a one-line emitter change. Functions now go out 64 to a unit
+      as `<prefix>_funcs_NNN.c`, with registration in its own
+      `<prefix>_register.c` — it has to come last, because the interior labels
+      it dispatches to are only known once every function has been emitted, and
+      the shared header is written before they exist.
+
+      Lumberjack's 6857 functions land in **108 units**. A clean build of the
+      whole corpus is **9.2 s** with `/MP`, `/bigobj` retired. Behaviour is
+      unchanged: same 20,000,000 dispatched calls, same 31 misses.
+
+- [x] **Rewrite a generated file only when its contents change.** Without this
+      the split buys nothing — every re-emit touches every file and the build is
+      full again. Each output goes to a temporary and is committed only if it
+      differs. A re-emit with no emitter change now reports **0 of 111 files
+      changed** and the rebuild takes **0.65 s**.
+
+- [x] **`allegrexrecomp dump <file> <addr>`** — one function's generated C on
+      stdout. An address out of a trace is usually *inside* a function rather
+      than at its entry, so the ownership map resolves it to the owning routine
+      and says so. Bring-up is per-address forensics; reading sixty lines should
+      not mean re-emitting half a million.
+
+**Considered and dropped.** Ninja as the documented generator: MSBuild with
+`/MP` and a `CONFIGURE_DEPENDS` glob already gives the parallel and incremental
+build the split was for, and 9.2 s clean is not a number worth a second
+toolchain. Their downstream port also sidesteps decryption by driving the user's
+own PPSSPP to dump a decrypted EBOOT; that is legally the same arrangement
+[`docs/DECRYPT.md`](docs/DECRYPT.md) already documents for `pspdecrypt` —
+external process, nothing linked — and `pspdecrypt` is a CLI rather than a GUI
+feature to script, so it stays the recommended unblock. Their pinned-SHA-256
+dependency download does not apply: the core has no external dependencies and is
+meant to keep it that way.

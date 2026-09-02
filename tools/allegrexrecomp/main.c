@@ -34,6 +34,7 @@ static int usage(void) {
         "  allegrexrecomp cover   <file>\n"
         "  allegrexrecomp funcs   <file> [--list]\n"
         "  allegrexrecomp emit    <file> <outdir> [prefix]\n"
+        "  allegrexrecomp dump    <file> <addr>\n"
         "  allegrexrecomp decrypt <file> [--keys <path>]\n"
         "  allegrexrecomp kirk1   <file> [out] [--keys <path>]\n"
         "\n"
@@ -758,6 +759,29 @@ static int cmd_emit(const char *path, const char *outdir, const char *prefix) {
     return rc == 0 ? 0 : 1;
 }
 
+/* Print one function's generated C. Bring-up is per-address forensics -- a
+ * register clobbered here, a frame not closed there -- and re-emitting a
+ * quarter-million lines to read sixty of them is a poor way to spend a minute.
+ * Same emitter, same output, one function. */
+static int cmd_dump(const char *path, const char *addrs) {
+    psp_blob b;
+    elf_info e;
+    a_analysis an;
+    uint32_t addr = (uint32_t)strtoul(addrs, NULL, 0);
+    int rc;
+
+    if (load_and_discover(path, &b, &e, &an, NULL, NULL, NULL, NULL) != 0) return 1;
+
+    rc = a_emit_one(&an, addr, stdout);
+    if (rc != 0)
+        fprintf(stderr, "no discovered function starts at 0x%08X "
+                        "(%d do -- see `funcs --list`)\n", addr, an.nfuncs);
+
+    a_analysis_free(&an);
+    psp_blob_free(&b);
+    return rc == 0 ? 0 : 1;
+}
+
 /* ---- decryption ---------------------------------------------------------- */
 
 static uint32_t rd32le(const uint8_t *p) {
@@ -972,6 +996,10 @@ int main(int argc, char **argv) {
     if (!strcmp(cmd, "emit")) {
         if (argc < 4) return usage();
         return cmd_emit(argv[2], argv[3], argc > 4 ? argv[4] : NULL);
+    }
+    if (!strcmp(cmd, "dump")) {
+        if (argc < 4) return usage();
+        return cmd_dump(argv[2], argv[3]);
     }
     if (!strcmp(cmd, "extract")) {
         if (argc < 5) return usage();

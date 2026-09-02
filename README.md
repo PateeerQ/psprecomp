@@ -23,16 +23,26 @@ This is the same philosophy behind:
 - [PS2Recomp](https://github.com/ran-j/PS2Recomp) (PS2 → native)
 - [ps3recomp](https://github.com/sp00nznet/ps3recomp) (PS3 → native)
 
-...and for the PSP, where
-[sal063/PSP-recompilation-project](https://github.com/sal063/PSP-recompilation-project)
-got there first — same idea, offline MIPS-to-C plus a native runtime, with an
-SDL3/Vulkan backend. Worth reading if you are interested in this problem.
+## Other PSP recompilers — which one are you looking at?
 
-The two differ mainly in licensing posture: that project ports GPL code from
-PPSSPP for parts of its HLE, while psprecomp keeps a hard MIT boundary and uses
-emulators only as an oracle to diff against (see
-[docs/ORACLE.md](docs/ORACLE.md)). If you want a permissively-licensed base to
-build on, that is the distinction that matters.
+psprecomp was not first, and it is not the only project with this name. If you
+arrived here from a game port that credits "PSPRecomp", it was probably one of
+the others. All of these are separate codebases with no shared code:
+
+| Project | License | Shape |
+|---|---|---|
+| [sal063/PSP-recompilation-project](https://github.com/sal063/PSP-recompilation-project) | mixed | Got here first. Offline MIPS-to-C plus a native runtime, SDL3/Vulkan backend. Ports GPL code from PPSSPP for parts of its HLE. |
+| [jessicanataliagta/PSPRecomp](https://github.com/jessicanataliagta/PSPRecomp) | MIT | C++20 framework with game profiles in-tree (`-DPSPRECOMP_PROFILE=`); first profile is GTA: Vice City Stories on DX12. **Unrelated to this repo despite the identical name** — downstream ports such as [fuc-recomp](https://github.com/elprogramadorloco-arch/fuc-recomp) build on that one. |
+| [wizardengineer/psprecomp](https://github.com/wizardengineer/psprecomp) | GPL-2.0 | Rust analyze/decode/emit pipeline emitting C++17, SDL2 + OpenGL runtime. |
+| **this repo** | MIT | C11 throughout, toolkit consumed by a game repo as a submodule, renderer behind a backend interface. |
+
+All of them are worth reading if this problem interests you.
+
+What distinguishes this one is licensing posture rather than ambition: psprecomp
+keeps a hard MIT boundary and uses emulators strictly as an oracle to diff
+against, never as a source of code (see [docs/ORACLE.md](docs/ORACLE.md)). If
+you want a permissively-licensed base to build on, that is the difference that
+matters.
 
 ## Why PSP?
 
@@ -120,7 +130,7 @@ psprecomp/
           │  allegrexrecomp    │   (jump tables + the module's export table),
           │  (tools/)          │   translate each to readable C
           └────────────────────┘
-                  │  <prefix>_funcs.c
+                  │  <prefix>_funcs_000..NNN.c
                   ▼
           ┌────────────────────┐   CPU state · memory map · semantic helpers ·
           │  psprecomp (lib)   │   sceKernel/sceGu HLE · dispatch · rasterizer
@@ -231,8 +241,16 @@ allegrexrecomp dis     <file> [addr] [count]     disassemble Allegrex code
 allegrexrecomp cover   <file>                    decode-coverage report
 allegrexrecomp funcs   <file> [--list]           function discovery report
 allegrexrecomp emit    <file> <outdir> [prefix]  generate C
+allegrexrecomp dump    <file> <addr>             print one function's C
 allegrexrecomp decrypt <file> [--keys <path>]    peel a ~PSP module
 ```
+
+`emit` writes the corpus as `<prefix>_funcs_NNN.c` — 64 functions to a
+translation unit — plus a shared header, the import thunks, and a registration
+unit. A file whose contents did not change is left untouched, so a re-emit after
+an emitter tweak rebuilds only what actually moved. `dump` runs the same emitter
+over a single function and prints it; an address from a trace that lands inside
+a function resolves to the routine that owns it.
 
 `info` accepts anything in the stack — a disc image, a PBP, a `~PSP` or `~SCE`
 module, a plain ELF/PRX — and recurses one level, so pointing it at a

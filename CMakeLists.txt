@@ -21,9 +21,10 @@ set(CMAKE_C_STANDARD_REQUIRED ON)
 
 if(MSVC)
     add_compile_options(/W3)
-    # The generated C is millions of lines; MSVC's default object format
-    # cannot hold that many sections.
-    add_compile_options(/bigobj)
+    # /MP: the generated corpus is hundreds of translation units, and building
+    # them one at a time is the slowest part of the loop. No /bigobj -- the
+    # emitter splits its output, so no single unit is large enough to need it.
+    add_compile_options(/MP)
     add_compile_definitions(_CRT_SECURE_NO_WARNINGS)
 else()
     add_compile_options(-Wall -Wextra -Wno-unused-parameter)

@@ -48,6 +48,18 @@ static const uint32_t CODE[] = {
     0x24420001u, 0x8FBF000Cu, 0x03E00008u, 0x27BD0010u,
 };
 
+/* Read-only toggling, for the "did it rewrite a file it should not have?"
+ * check below. MSVC spells the POSIX names with an underscore. */
+#include <sys/stat.h>
+#ifdef _MSC_VER
+#  include <io.h>
+#  define set_readonly(p) _chmod((p), _S_IREAD)
+#  define set_writable(p) _chmod((p), _S_IREAD | _S_IWRITE)
+#else
+#  define set_readonly(p) chmod((p), S_IRUSR)
+#  define set_writable(p) chmod((p), S_IRUSR | S_IWUSR)
+#endif
+
 static char *slurp(const char *path, size_t *len) {
     FILE *f = fopen(path, "rb");
     if (!f) return NULL;
@@ -101,8 +113,15 @@ int main(void) {
     o.module = "synthetic";
     CHECK(a_emit(&an, &o) == 0, "emission succeeds");
 
-    char *src = slurp("./t_emit_funcs.c", NULL);
-    CHECK(src != NULL, "generated .c is readable");
+    /* The corpus is split across units. A stale monolithic file from an older
+     * build must not be here to answer for a unit that was never written --
+     * that is exactly how a test reports a pass for something it did not
+     * observe. */
+    CHECK(slurp("./t_emit_funcs.c", NULL) == NULL,
+          "no monolithic t_emit_funcs.c: functions go in numbered units");
+
+    char *src = slurp("./t_emit_funcs_000.c", NULL);
+    CHECK(src != NULL, "generated unit 0 is readable");
     if (!src) return 1;
 
     expect_contains(src, "void psp_func_08804000(void)",
@@ -154,11 +173,33 @@ int main(void) {
         free(hdr);
     }
 
-    /* Registration wires the address to the function. */
-    src = slurp("./t_emit_funcs.c", NULL);
+    /* Registration lives in its own unit, after every function is emitted --
+     * the interior labels it dispatches to are not known before then. */
+    src = slurp("./t_emit_register.c", NULL);
+    CHECK(src != NULL, "generated registration unit is readable");
     if (src) {
         expect_contains(src, "psp_register(0x08804000u, psp_func_08804000);",
                         "the function is registered for indirect dispatch");
+        free(src);
+    }
+
+    /* Re-emitting identical output must leave the files untouched. That is the
+     * whole point of splitting the corpus: a build system can only skip work it
+     * can see was not redone. A timestamp check cannot prove it (both emits
+     * land in the same second), so make the file read-only -- rewriting it
+     * anyway then fails loudly instead of silently. */
+    CHECK(set_readonly("./t_emit_funcs_000.c") == 0, "unit 0 can be made read-only");
+    CHECK(a_emit(&an, &o) == 0, "re-emitting unchanged output rewrites nothing");
+    set_writable("./t_emit_funcs_000.c");
+
+    /* ...and it must still rewrite one whose contents drifted. */
+    {
+        FILE *f = fopen("./t_emit_funcs_000.c", "wb");
+        if (f) { fputs("/* clobbered */\n", f); fclose(f); }
+        CHECK(a_emit(&an, &o) == 0, "re-emitting over a changed file succeeds");
+        src = slurp("./t_emit_funcs_000.c", NULL);
+        CHECK(src && strstr(src, "void psp_func_08804000(void)") != NULL,
+              "a changed unit is written back");
         free(src);
     }
 
