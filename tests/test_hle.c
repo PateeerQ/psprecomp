@@ -401,6 +401,50 @@ static void test_display(void) {
           "vblank waits advance the frame counter (the bring-up heartbeat)");
 }
 
+
+/* The unsubscribe-from-a-stub case: a game that spins on a call nobody
+ * implemented. It made 26 926 971 log lines -- 1.37 GB -- in one 30-second run,
+ * for a single call worth naming. */
+static void test_unimplemented_logging(void) {
+    psp_hle_unimplemented_reset();
+    CHECK(psp_hle_unimplemented_calls() == 0, "counter starts at zero");
+
+    /* Relative, because the zero-return total is a running total since start-up,
+     * not a per-test counter -- earlier tests have already made calls. */
+    uint64_t zero_before = psp_hle_zero_calls();
+
+    for (int i = 0; i < 100000; i++) psp_hle_call(0xDEAD0001u);   /* nobody registered this */
+
+    CHECK(psp_hle_unimplemented_calls() == 100000,
+          "every unimplemented call is counted");
+    CHECK(psp_hle_unimplemented_logged() <= 9,
+          "but only a bounded number are printed (was one per call: 1.37 GB)");
+    CHECK(psp_cpu.r[PSP_REG_V0] == 0,
+          "and the call still returns 0, as it did before");
+
+    /* The dump keeps a 16-entry ring but counts all of them, and the count has
+     * to survive passing the ring -- an `int` here wrapped and printed
+     * `last -1396532617 firmware calls`. */
+    CHECK(psp_hle_zero_calls() == zero_before + 100000,
+          "the zero-return ring's total counts past its own size");
+
+    FILE *f = tmpfile();
+    if (f) {
+        psp_hle_dump_recent(f);
+        rewind(f);
+        char buf[1024] = {0};
+        size_t got = fread(buf, 1, sizeof buf - 1, f);
+        fclose(f);
+        char expect[64];
+        snprintf(expect, sizeof expect, "%llu in total",
+                 (unsigned long long)(zero_before + 100000));
+        CHECK(got > 0 && strstr(buf, expect) != NULL,
+              "the dump reports the true total: %s", buf);
+        CHECK(strstr(buf, "last 16 firmware calls") != NULL,
+              "and caps its listing at the ring size, with no negative count");
+    }
+}
+
 int main(void) {
     CHECK(psp_mem_init() == 0, "memory init");
     psp_cpu_reset();
@@ -420,6 +464,7 @@ int main(void) {
     test_ge_infinite_list();
     test_sas_adpcm();
     test_display();
+    test_unimplemented_logging();
 
     psp_mem_free();
 

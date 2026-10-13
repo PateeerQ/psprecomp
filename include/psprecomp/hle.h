@@ -43,6 +43,16 @@ void psp_hle_call(uint32_t nid);
 /* Look up what is registered, for reporting. Returns NULL if absent. */
 const char *psp_hle_name(uint32_t nid);
 int         psp_hle_count(void);
+/* The message naming an unimplemented call is printed a bounded number of
+ * times; these are how much was kept back. `calls` is the number that tells a
+ * silenced message from one that stopped happening -- see the comment on
+ * UNIMPL_LOGGED in hle.c. */
+uint64_t psp_hle_unimplemented_calls(void);
+uint64_t psp_hle_unimplemented_logged(void);
+void     psp_hle_unimplemented_reset(void);
+
+/* Every zero-returning call ever made, not just the ZERO_HISTORY ring. */
+uint64_t psp_hle_zero_calls(void);
 
 /* Every registered entry, for the coverage report a game repo wants: which of
  * a module's imports actually exist yet. */
