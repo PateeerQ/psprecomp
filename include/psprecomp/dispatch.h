@@ -62,6 +62,22 @@ uint64_t psp_sp_call_violations(void);
 uint64_t psp_sp_violations(void);
 uint32_t psp_sp_first_bad(void);
 int32_t  psp_sp_first_delta(void);
+/* Stack imbalances grouped by site, largest magnitude first: the SHAPE of the
+ * noise rather than its first messages. A per-message cap makes a log that
+ * stopped read as "no large delta". One row per distinct (site, delta) with its
+ * count, and the largest magnitude is kept even when the table is full.
+ * `site` is the function of a body check, or the callee of a call check. */
+typedef struct {
+    uint32_t site;
+    int32_t  delta;
+    uint64_t count;
+    uint32_t in;        /* $sp expected / $sp before the call */
+    uint32_t out;       /* $sp observed / $sp after the call */
+    uint32_t last;      /* last function entered (body checks) */
+} psp_sp_site;
+
+int psp_sp_hist(psp_sp_site *out, int max);
+int psp_sp_call_hist(psp_sp_site *out, int max);
 void psp_trace_watch_label(uint32_t addr, void (*fn)(uint32_t));
 void psp_trace_marks_init(uint32_t lo, uint32_t words);
 int psp_trace_was_marked(uint32_t addr);
