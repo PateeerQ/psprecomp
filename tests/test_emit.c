@@ -71,6 +71,163 @@ static void expect_contains(const char *hay, const char *needle, const char *why
     }
 }
 
+/* ---- a delay slot the branch does not own ---------------------------------
+ *
+ * A branch that leaves its body still runs its delay slot: the hardware
+ * executes it whichever way the branch goes. When the slot belongs to *this*
+ * body the emitter folds it into the branch, and the body that owns it skips
+ * its own copy. When it belongs to another body -- discovery promotes a slot
+ * address to a function entry on every real module -- there is no copy here to
+ * fold in, and the walk used to step over the slot anyway. The body's `end`
+ * then pointed one instruction past the address control actually reaches, and
+ * the fall-out was looked for at an address that is neither a function entry
+ * nor a label, so nothing was emitted at all: a silent `return`. A body that
+ * stops early usually still holds a frame that only the continuation pops, so
+ * its caller resumes with a $sp that is short by a frame.
+ *
+ * Hand-built analyses, not discovered ones: this shape is about where a body
+ * *ends*, and discovery promotes and merges entries in an order-dependent way,
+ * so a test for it must not itself depend on the discovery order.
+ *
+ *   08804000  sltiu $v0,$t2,16        the body under test
+ *   08804004  beq   $v0,$zero,08804014
+ *   08804008  addiu $v0,$zero,76      <- the delay slot: the first instruction
+ *   0880400C  jr    $ra                  of the body below
+ *   08804010  nop
+ *   08804014  jr    $ra               the branch target, a function of its own
+ *   08804018  nop
+ */
+static const uint32_t SLOT_NOT_OWNED_BRANCH[] = {
+    0x2D420010u,   /* 08804000  sltiu $v0,$t2,16                  */
+    0x10400003u,   /* 08804004  beq   $v0,$zero,08804014          */
+    0x2402004Cu,   /* 08804008  addiu $v0,$zero,76   <- delay slot, not ours */
+    0x03E00008u,   /* 0880400C  jr    $ra                         */
+    0x00000000u,   /* 08804010  nop                               */
+    0x03E00008u,   /* 08804014  jr    $ra                         */
+    0x00000000u,   /* 08804018  nop                               */
+};
+
+/*  08804000  jal   08804010        the body under test
+ *  08804004  addiu $v0,$zero,76     <- the call's delay slot, another body's
+ *  08804008  jr    $ra                 first instruction
+ *  0880400C  nop
+ *  08804010  jr    $ra             the call target, a function of its own
+ *  08804014  nop
+ */
+static const uint32_t SLOT_NOT_OWNED_CALL[] = {
+    0x0C201004u,   /* 08804000  jal   08804010                    */
+    0x2402004Cu,   /* 08804004  addiu $v0,$zero,76   <- delay slot, not ours */
+    0x03E00008u,   /* 08804008  jr    $ra                         */
+    0x00000000u,   /* 0880400C  nop                               */
+    0x03E00008u,   /* 08804010  jr    $ra                         */
+    0x00000000u,   /* 08804014  nop                               */
+};
+
+static int count_of(const char *hay, const char *needle) {
+    int n = 0;
+    for (const char *p = hay; (p = strstr(p, needle)) != NULL; p += strlen(needle))
+        n++;
+    return n;
+}
+
+/* Build an analysis by hand over `code` with the given ownership. */
+static void hand_built(a_analysis *an, uint32_t *owners, uint32_t nwords,
+                       a_func *funcs, int nfuncs, const uint32_t *code) {
+    memset(an, 0, sizeof *an);
+    an->code = (uint8_t *)code;
+    an->base = BASE;
+    an->size = nwords * 4;
+    an->nwords = nwords;
+    an->owner = owners;
+    an->funcs = funcs;
+    an->nfuncs = nfuncs;
+}
+
+static char *emit_case(const a_analysis *an, const char *prefix) {
+    emit_opts o;
+    memset(&o, 0, sizeof o);
+    o.outdir = ".";
+    o.prefix = prefix;
+    o.module = "synthetic";
+    CHECK(a_emit(an, &o) == 0, "%s: emission succeeds", prefix);
+    char path[128];
+    snprintf(path, sizeof path, "./%s_funcs.c", prefix);
+    return slurp(path, NULL);
+}
+
+static void check_slot_of_another_body(void) {
+    /* Case one: a conditional branch whose delay slot is another body's first
+     * instruction. On the previous behaviour this body ended in a silent
+     * `return` -- one that also skipped the delay slot on the way. */
+    {
+        uint32_t owners[7] = { BASE, BASE,
+                               BASE + 0x08u, BASE + 0x08u, BASE + 0x08u,
+                               BASE + 0x14u, BASE + 0x14u };
+        a_func funcs[3];
+        memset(funcs, 0, sizeof funcs);
+        funcs[0].addr = BASE;          funcs[0].start = BASE;
+        funcs[0].end  = BASE + 0x0Cu;  funcs[0].insns = 2;
+        funcs[1].addr = BASE + 0x08u;  funcs[1].start = BASE + 0x08u;
+        funcs[1].end  = BASE + 0x14u;  funcs[1].insns = 3;
+        funcs[2].addr = BASE + 0x14u;  funcs[2].start = BASE + 0x14u;
+        funcs[2].end  = BASE + 0x1Cu;  funcs[2].insns = 2;
+        funcs[2].has_return = 1;
+
+        a_analysis an;
+        hand_built(&an, owners, 7, funcs, 3, SLOT_NOT_OWNED_BRANCH);
+        char *src = emit_case(&an, "t_slot_branch");
+        CHECK(src != NULL, "branch case: generated .c is readable");
+        if (src) {
+            expect_contains(src, "/* falls into 0x08804008, owned by another function */",
+                            "the not-taken path continues at the delay slot");
+            expect_contains(src, "psp_func_08804008();",
+                            "and reaches it as a function, which is what it is");
+            expect_contains(src, "PSP_SP_CHECK(0x08804008u);",
+                            "with the stack observed across the call");
+            const char *cond = strstr(src, "int _c = (r_v0 == r_zero);");
+            const char *call = strstr(src, "psp_func_08804008();");
+            CHECK(cond && call && cond < call,
+                  "the continuation is emitted after the branch, not instead of it");
+            /* The slot must run exactly once, in the body that owns it: folding
+             * it in here as well would run it twice on the way through. */
+            int n = count_of(src, "r_v0 = r_zero + 76;");
+            CHECK(n == 1, "the delay slot is emitted exactly once, got %d", n);
+            free(src);
+        }
+    }
+
+    /* Case two: the same shape under a call, which is a separate line of the
+     * emitter and would otherwise drift. */
+    {
+        uint32_t owners[6] = { BASE,
+                               BASE + 0x04u, BASE + 0x04u, BASE + 0x04u,
+                               BASE + 0x10u, BASE + 0x10u };
+        a_func funcs[3];
+        memset(funcs, 0, sizeof funcs);
+        funcs[0].addr = BASE;          funcs[0].start = BASE;
+        funcs[0].end  = BASE + 0x08u;  funcs[0].insns = 1;
+        funcs[1].addr = BASE + 0x04u;  funcs[1].start = BASE + 0x04u;
+        funcs[1].end  = BASE + 0x10u;  funcs[1].insns = 3;
+        funcs[2].addr = BASE + 0x10u;  funcs[2].start = BASE + 0x10u;
+        funcs[2].end  = BASE + 0x18u;  funcs[2].insns = 2;
+        funcs[2].has_return = 1;
+
+        a_analysis an;
+        hand_built(&an, owners, 6, funcs, 3, SLOT_NOT_OWNED_CALL);
+        char *src = emit_case(&an, "t_slot_call");
+        CHECK(src != NULL, "call case: generated .c is readable");
+        if (src) {
+            expect_contains(src, "/* falls into 0x08804004, owned by another function */",
+                            "after the call, control continues at the delay slot");
+            expect_contains(src, "psp_func_08804004();",
+                            "and reaches it as a function");
+            int n = count_of(src, "r_v0 = r_zero + 76;");
+            CHECK(n == 1, "the delay slot is still emitted exactly once, got %d", n);
+            free(src);
+        }
+    }
+}
+
 int main(void) {
     uint8_t code[sizeof CODE];
     for (size_t i = 0; i < sizeof CODE / sizeof CODE[0]; i++) {
@@ -163,6 +320,8 @@ int main(void) {
     }
 
     a_analysis_free(&an);
+
+    check_slot_of_another_body();
 
     if (failures) {
         printf("\n%d check(s) failed\n", failures);
