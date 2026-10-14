@@ -209,10 +209,18 @@ static void check_terminal_transfer_stays_tail(void) {
                                  "a fall-out into another function stays a tail jump");
             expect_absent(src, "PSP_SP_CALL(0x08804008u",
                           "no stack observation after the fall-out transfer");
-            const char *chk = strstr(src, "PSP_SP_CHECK(0x08804008u);");
+            /* Both labels are 0x08804008 -- the fall-out names its target, and
+             * that target's own `jr $ra` names itself -- so the assertion has to
+             * be scoped to the gap: the judgement between the comment and the
+             * transfer must be the fall-out one. */
+            const char *gap = strstr(src, "/* falls into 0x08804008, owned by another function */");
             const char *call = strstr(src, "psp_func_08804008();");
-            CHECK(chk && call && chk < call,
-                  "the falling-out body's own stack check comes before the transfer");
+            const char *leave = gap ? strstr(gap, "PSP_SP_LEAVE(0x08804008u);") : NULL;
+            const char *check = gap ? strstr(gap, "PSP_SP_CHECK(0x08804008u);") : NULL;
+            CHECK(gap && leave && call && gap < leave && leave < call,
+                  "the fall-out judges a hand-over, before the transfer");
+            CHECK(!check || check > call,
+                  "a fall-out is not judged as if it were a return");
             free(src);
         }
     }
@@ -314,6 +322,11 @@ int main(void) {
         const char *ret = slot ? strstr(slot, "return;") : NULL;
         CHECK(slot && ret, "the `jr $ra` delay slot is emitted before the return");
     }
+
+    /* A `jr $ra` keeps the other rule: the body must leave $sp as it found it,
+     * so its exit is judged against its own entry. */
+    expect_contains(src, "PSP_SP_CHECK(0x08804018u);",
+                    "a return exit is checked against its own entry");
 
     /* $zero is never assigned: `addu $v0,$a0,$a1` reads it, but nothing may
      * write it. A generated `r_zero =` would corrupt every later use. */
