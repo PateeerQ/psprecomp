@@ -519,14 +519,23 @@ static void emit_slot_alias(ectx *c, uint32_t a, const a_insn *slot, int falls_t
 
 /* ---- one function -------------------------------------------------------- */
 
-static void emit_function(ectx *c, const a_func *fn) {
+/* Which owned addresses are branch targets, and which are consumed as delay
+ * slots.
+ *
+ * Run for every function before any body is emitted, and again for the function
+ * being emitted (the second run marks nothing new -- marking is monotone).
+ *
+ * This has to be module-wide because the map is read from *other* bodies: a
+ * body whose last instruction falls through asks whether the address after it
+ * is reachable by name, and that address may belong to a body emitted far
+ * later. Measured on LocoRoco: 0x3B2A8 falls into 0x3B2B0, a label of
+ * psp_body_0003B8F8 -- a backward jump pulls that block below the entry, so the
+ * owner is emitted after it -- and with the marking done per body alone the
+ * test saw "no label" and the continuation was never emitted. */
+static void mark_labels(ectx *c, const a_func *fn) {
     const a_analysis *an = c->an;
-    FILE *f = c->out;
     const uint32_t owner = fn->addr;
 
-    /* Pass 1: which owned addresses are branch targets, and which are consumed
-     * as delay slots. A delay slot is emitted inline with its branch, so the
-     * main pass must skip it. */
     for (uint32_t a = fn->start; a < fn->end; a += 4) {
         if (!owned_by(an, a, owner)) continue;
         a_insn in;
@@ -555,6 +564,17 @@ static void emit_function(ectx *c, const a_func *fn) {
         if (c->is_slot[i] && c->is_label[i] && owned_by(an, a + 4, owner))
             c->is_label[widx(an, a + 4)] = 1;
     }
+}
+
+static void emit_function(ectx *c, const a_func *fn) {
+    const a_analysis *an = c->an;
+    FILE *f = c->out;
+    const uint32_t owner = fn->addr;
+
+    /* Pass 1: the label and delay-slot map. Complete for the whole module by
+     * the time this runs; repeated here because marking is monotone and nothing
+     * downstream may depend on the order bodies happen to be emitted in. */
+    mark_labels(c, fn);
 
     fprintf(f, "\n/* ---------------------------------------------------------------\n");
     fprintf(f, " * psp_func_%08X  --  %u instructions, %u bytes\n",
@@ -789,13 +809,37 @@ static void emit_function(ectx *c, const a_func *fn) {
      * how it surfaced -- reach went *down* while every other measure improved.
      *
      * So if the last instruction emitted could fall through, and the address
-     * after this function is another function's entry, continue there. */
+     * after this function is another function's entry, continue there.
+     *
+     * The address after the function is not always a function entry, though,
+     * and the other case was left silent: the flow fell out of the body and the
+     * C function simply ended, i.e. returned. It is the more common case on a
+     * real module -- 605 bodies on LocoRoco -- and the worse symptom, because a
+     * body that stops early usually still holds a frame that only the enclosing
+     * epilogue pops. Measured: the case at 0x3B2AC of a 656-byte-frame state
+     * machine falls into 0x3B2B0, a label inside psp_body_0003B8F8; the silent
+     * return cut the machine before its shared epilogue, the 656 bytes were
+     * never given back, the caller reloaded $s5 656 bytes low, read 0xFFFFFFFF
+     * and the run died on `jalr $s5`. Continuing there is what the hardware
+     * does, and the thunk already exists -- the one an indirect jump to that
+     * label resolves to. */
     if (!last_terminal) {
         uint32_t next = fn->end;
         if (is_function(an, next)) {
             fprintf(f, "    /* falls through into the next function */\n");
             fprintf(f, "    psp_func_%08X();\n", next);
+        } else if (next < an->base + an->size &&
+                   an->owner[widx(an, next)] != A_NO_OWNER &&
+                   !c->is_slot[widx(an, next)] && c->is_label[widx(an, next)]) {
+            fprintf(f, "    /* falls through into 0x%08X, a label of another body */\n", next);
+            fprintf(f, "    psp_at_%08X();\n", next);
         }
+        /* The remaining case -- an address no body holds, usually a `.word`
+         * tail -- keeps the silent return for now. Dispatching there instead
+         * was measured to stop the run EARLIER: 1605 sites, and the boot path's
+         * initialiser walk fell from entry [99] to entry [9], because those
+         * addresses are registered nowhere and a dispatch misses where the
+         * silent return at least let the run continue. */
     }
     fprintf(f, "}\n");
 
@@ -970,6 +1014,31 @@ int a_emit(const a_analysis *an, const emit_opts *o) {
     if (!c.is_label || !c.is_slot) {
         free(c.is_label); free(c.is_slot); fclose(f);
         return -1;
+    }
+
+    /* The label map is module-wide and complete before the first body is
+     * emitted: a body's last instruction can fall through into a label that
+     * belongs to a body emitted later. */
+    for (int i = 0; i < an->nfuncs; i++) mark_labels(&c, &an->funcs[i]);
+
+    /* Forward declarations for the interior-label thunks.
+     *
+     * A body can fall out into a label of a body emitted later, so the thunk it
+     * calls is defined hundreds of thousands of lines further down the file.
+     * Without these, C99 rejects the call -- "call to undeclared function
+     * psp_at_...", 20 errors and no object file -- which is how this was found:
+     * the fall-out continuation produced a generated file that did not compile.
+     * The set is exactly the one the per-body thunk loop emits, and the
+     * module-wide label map is what makes it computable before any body. */
+    fprintf(f, "/* Entry thunks for interior labels: a body can fall out into a\n"
+               " * label that is defined later in this file. */\n");
+    for (int i = 0; i < an->nfuncs; i++) {
+        const a_func *fn = &an->funcs[i];
+        for (uint32_t a = fn->start; a < fn->end; a += 4) {
+            if (!owned_by(an, a, fn->addr) || !c.is_label[widx(an, a)]) continue;
+            if (c.is_slot[widx(an, a)] || a == fn->addr) continue;
+            fprintf(f, "void psp_at_%08X(void);\n", a);
+        }
     }
 
     for (int i = 0; i < an->nfuncs; i++) {
