@@ -519,6 +519,18 @@ static void emit_slot_alias(ectx *c, uint32_t a, const a_insn *slot, int falls_t
 
 /* ---- one function -------------------------------------------------------- */
 
+/* Can a delay slot be emitted a second time, inside the taken path?
+ *
+ * Only a plain instruction can. An instruction that transfers control while
+ * sitting in a delay slot is architecturally unpredictable, so there is no
+ * meaning to reproduce and this leaves those alone rather than inventing one.
+ * Measured on LocoRoco: 30 branch sites have a slot another body owns, and none
+ * of the 30 slots transfers control. */
+static int slot_repeatable(const a_insn *s) {
+    return !s->is_branch && !s->is_call && !s->is_return &&
+           !s->is_indirect && !s->is_jump;
+}
+
 static void emit_function(ectx *c, const a_func *fn) {
     const a_analysis *an = c->an;
     FILE *f = c->out;
@@ -657,13 +669,33 @@ static void emit_function(ectx *c, const a_func *fn) {
                         (in.is_jump && !in.is_call);
         comment(c, &in);
 
-        /* The delay-slot instruction, if this transfers control. */
+        /* The delay-slot instruction, if this transfers control.
+         *
+         * Decoded even when another body owns the address: the taken path of a
+         * branch has to run it anyway (see taken_slot below), and that is the
+         * only place this body can emit it. */
         a_insn slot;
+        int slot_decoded = 0;
         int have_slot = 0;
-        if (in.has_delay_slot && owned_by(an, a + 4, owner)) {
+        if (in.has_delay_slot && a + 4 >= an->base && a + 4 < an->base + an->size) {
             a_decode(fetch(an, a + 4), a + 4, &slot);
-            have_slot = 1;
+            slot_decoded = 1;
+            have_slot = owned_by(an, a + 4, owner);
         }
+
+        /* A branch delays BOTH paths. A slot this body owns is emitted inline
+         * above the condition, which runs it on both. A slot another body owns
+         * is not emitted inline -- the walk reaches it by falling through, and
+         * that path reaches it from there -- so the TAKEN path jumped straight
+         * past an instruction the hardware always runs.
+         *
+         * Measured on LocoRoco (UCES00304): 0x1571C is
+         * `beq $v0,$zero,0x15774` whose slot at 0x15720 is `lui $v0,0x1C`, and
+         * 0x15774 loads eight kilobytes through $v0. The taken path left $v0
+         * zero, so the game read the module's own code as a table and reported
+         * the word `lw $ra,12($sp)` -- 0x8FBF000C -- as an address. 30 branch
+         * sites in this module have a slot another body owns. */
+        const int taken_slot = slot_decoded && !have_slot && slot_repeatable(&slot);
 
         if (in.is_branch) {
             char cond[128];
@@ -674,7 +706,8 @@ static void emit_function(ectx *c, const a_func *fn) {
                  * so the slot belongs inside the taken path. The condition is
                  * naturally evaluated before it. */
                 fprintf(f, "    if (%s) {\n", cond);
-                if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "        "); }
+                if (have_slot || taken_slot)
+                    { comment(c, &slot); emit_simple(c, &slot, "        "); }
                 if (in.is_call) fprintf(f, "        %s = 0x%08Xu;\n", RN[31], a + 8);
                 if (owned_by(an, in.target, owner))
                     { if (in.target <= a) fprintf(f, "        PSP_LOOP(0x%08Xu);\n", in.target);
@@ -697,14 +730,30 @@ static void emit_function(ectx *c, const a_func *fn) {
                 fprintf(f, "    { int _c = (%s);\n", cond);
                 if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "      "); }
                 if (in.is_call) fprintf(f, "      %s = 0x%08Xu;\n", RN[31], a + 8);
-                if (owned_by(an, in.target, owner))
-                    { if (in.target <= a) fprintf(f, "      if (_c) PSP_LOOP(0x%08Xu);\n", in.target);
-                      fprintf(f, "      if (_c) goto L_%08X; }\n", in.target); }
-                else {
-                    fprintf(f, "      if (_c) { ");
-                    if (is_import(an, in.target))      fprintf(f, "psp_import_%08X();", in.target);
+                if (owned_by(an, in.target, owner)) {
+                    if (in.target <= a) fprintf(f, "      if (_c) PSP_LOOP(0x%08Xu);\n", in.target);
+                    if (taken_slot) {
+                        fprintf(f, "      if (_c) {\n");
+                        comment(c, &slot);
+                        emit_simple(c, &slot, "        ");
+                        fprintf(f, "        goto L_%08X; } }\n", in.target);
+                    } else {
+                        fprintf(f, "      if (_c) goto L_%08X; }\n", in.target);
+                    }
+                } else if (taken_slot) {
+                    fprintf(f, "      if (_c) {\n");
+                    comment(c, &slot);
+                    emit_simple(c, &slot, "        ");
+                    fprintf(f, "        ");
+                    if (is_import(an, in.target))        fprintf(f, "psp_import_%08X();", in.target);
                     else if (is_function(an, in.target)) fprintf(f, "psp_func_%08X();", in.target);
-                    else                                fprintf(f, "psp_dispatch(0x%08Xu);", in.target);
+                    else                                 fprintf(f, "psp_dispatch(0x%08Xu);", in.target);
+                    fprintf(f, "\n        return; } }\n");
+                } else {
+                    fprintf(f, "      if (_c) { ");
+                    if (is_import(an, in.target))        fprintf(f, "psp_import_%08X();", in.target);
+                    else if (is_function(an, in.target)) fprintf(f, "psp_func_%08X();", in.target);
+                    else                                 fprintf(f, "psp_dispatch(0x%08Xu);", in.target);
                     fprintf(f, " return; } }\n");
                 }
             }
