@@ -112,6 +112,42 @@ static void emit_static_call(ectx *c, uint32_t target) {
     }
 }
 
+/* Emit a call that ENDS the body: nothing may follow it but `return`.
+ *
+ * A transfer that ends a body -- a fall-out into the next function, a `j` to a
+ * function entry, the taken path of a likely branch -- pushes nothing on the
+ * hardware. Recompiled it is a call, and only a call in tail position lets the
+ * compiler reuse the caller's frame instead of growing one. Put a single
+ * statement after it and every guest transfer that crosses a body boundary
+ * costs host stack. Measured on one machine (clang -O2, arm64):
+ *
+ *     { ...; callee(); PSP_SP_CALL(...); }   stp x20,x19,[sp,#-32]! ... bl callee
+ *     callee(); return;                      b callee
+ *
+ * so a loop the hardware runs forever without touching its stack exhausts the
+ * 16 MB host stack of a worker thread in about a second, and the signature is a
+ * SIGBUS inside the guest's own main loop, with the backtrace repeating two
+ * recompiled bodies. Measured on LocoRoco: the host stack high-water fell from
+ * 16385 KB to 9 KB once these three sites kept the transfer terminal.
+ *
+ * Nothing is given up here: the pair PSP_SP_CALL compares -- the caller's $sp at
+ * the call against the callee's on return -- is the same pair PSP_SP_CHECK
+ * compares inside the callee, where it names the exit that failed rather than
+ * the call site. The fall-out site keeps its own check, moved before the
+ * transfer so it cannot cost a frame.
+ *
+ * The ordinary-branch path already emitted its transfers this way; these three
+ * sites were the exception. */
+static void emit_static_call_tail(ectx *c, uint32_t target) {
+    if (is_import(c->an, target)) {
+        fprintf(c->out, "    psp_import_%08X();\n", target);
+    } else if (is_function(c->an, target)) {
+        fprintf(c->out, "    psp_func_%08X();\n", target);
+    } else {
+        fprintf(c->out, "    psp_dispatch(0x%08Xu);  /* not discovered */\n", target);
+    }
+}
+
 /* ---- one non-control-flow instruction ------------------------------------ */
 
 /* `ind` is the indentation, so a delay slot emitted inside an `if` body lines
@@ -640,8 +676,15 @@ static void emit_function(ectx *c, const a_func *fn) {
              * after the gap is reachable through its own entry. */
             if (!last_terminal) {
                 fprintf(f, "    /* falls into 0x%08X, owned by another function */\n", a);
-                emit_static_call(c, a);
-                fprintf(f, "    PSP_SP_CHECK(0x%08Xu);\n    return;\n", a);
+                /* This body's own balance, checked before the transfer: after
+                 * it, the check would cost the frame the transfer must not
+                 * need. A fall-out legitimately leaves $sp mid-frame, so what
+                 * this reports is a body that unwound too much, not too little.
+                 * The balance of the body being entered is its own business and
+                 * it checks that at its own exits. */
+                fprintf(f, "    PSP_SP_CHECK(0x%08Xu);\n", a);
+                emit_static_call_tail(c, a);
+                fprintf(f, "    return;\n");
                 last_terminal = 1;
             }
             continue;
@@ -680,7 +723,7 @@ static void emit_function(ectx *c, const a_func *fn) {
                     { if (in.target <= a) fprintf(f, "        PSP_LOOP(0x%08Xu);\n", in.target);
                       fprintf(f, "        goto L_%08X;\n", in.target); }
                 else
-                    { emit_static_call(c, in.target); fprintf(f, "        return;\n"); }
+                    { emit_static_call_tail(c, in.target); fprintf(f, "        return;\n"); }
                 fprintf(f, "    }\n");
             } else {
                 /* An ordinary branch always executes its delay slot, and reads
@@ -764,7 +807,7 @@ static void emit_function(ectx *c, const a_func *fn) {
             if (owned_by(an, in.target, owner) && !is_function(an, in.target)) {
                 fprintf(f, "    goto L_%08X;\n", in.target);
             } else {
-                emit_static_call(c, in.target);  /* tail call */
+                emit_static_call_tail(c, in.target);  /* tail call, and it must stay one */
                 fprintf(f, "    return;\n");
             }
             if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 0);
