@@ -244,7 +244,7 @@ int main(void) {
     o2.module = "synthetic";
     CHECK(a_emit(&an2, &o2) == 0, "vfim emission succeeds");
 
-    char *vsrc = slurp("./t_vfim_funcs.c", NULL);
+    char *vsrc = slurp("./t_vfim_funcs_000.c", NULL);
     CHECK(vsrc != NULL, "generated vfim .c is readable");
     if (vsrc) {
         /* The destination is the encoding's vt field, not the generic vd. */
