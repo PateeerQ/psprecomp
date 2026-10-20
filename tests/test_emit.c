@@ -131,7 +131,13 @@ static char *emit_case(const a_analysis *an, const char *prefix) {
     o.module = "synthetic";
     CHECK(a_emit(an, &o) == 0, "%s: emission succeeds", prefix);
     char path[128];
-    snprintf(path, sizeof path, "./%s_funcs.c", prefix);
+    snprintf(path, sizeof path, "./%s_funcs_000.c", prefix);
+    return slurp(path, NULL);
+}
+
+static char *emit_case_header(const char *prefix) {
+    char path[128];
+    snprintf(path, sizeof path, "./%s_funcs.h", prefix);
     return slurp(path, NULL);
 }
 
@@ -159,16 +165,18 @@ static void check_fall_out(void) {
             expect_contains(src, "psp_at_08804008();",
                             "and continues there, through that label's thunk");
             /* The thunk is defined with the body that owns the label, which is
-             * emitted AFTER the body that calls it: without a declaration the
-             * generated file does not compile at all. */
-            const char *decl = strstr(src, "void psp_at_08804008(void);");
-            const char *call = strstr(src, "psp_at_08804008();");
+             * emitted AFTER the body that calls it, possibly in another unit:
+             * without a declaration the generated file does not compile at all.
+             * The declaration lives in the shared header, which every unit
+             * includes before its first body. */
+            char *hdr = emit_case_header("t_fallout_label");
+            const char *incl = strstr(src, "#include \"t_fallout_label_funcs.h\"");
             const char *first_body = strstr(src, "static void psp_body_");
-            CHECK(decl != NULL, "the thunk is declared");
-            CHECK(decl && call && decl < call,
-                  "the declaration precedes the call that needs it");
-            CHECK(!first_body || (decl && decl < first_body),
-                  "the declarations precede the bodies");
+            CHECK(hdr && strstr(hdr, "void psp_at_08804008(void);") != NULL,
+                  "the thunk is declared in the shared header");
+            CHECK(incl && (!first_body || incl < first_body),
+                  "the unit includes that header before the bodies");
+            free(hdr);
             free(src);
         }
     }
