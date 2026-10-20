@@ -391,6 +391,7 @@ void psp_trace_sp_leave(uint32_t fn, uint32_t sp_in, uint32_t sp_out) {
     if (sp_in == sp_out) return;
     int32_t d = (int32_t)(sp_out - sp_in);
     if (d < 0) return;                    /* this fragment's own frame: expected */
+    sp_record(&g_sp_tbl, fn, d, sp_in, sp_out, psp_trace_last());
     if (g_sp_bad < 24)
         fprintf(stderr, "sp HANDED OVER HIGH in 0x%08X: %+d   <-- released a frame "
                         "it never took\n", fn, (int)d);

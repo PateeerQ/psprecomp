@@ -260,6 +260,17 @@ static void test_stack_handover(void) {
 
     psp_trace_sp_leave(0x08804000u, 0x09FFF000u, 0x09FFF000u + 64u);
     CHECK(psp_sp_violations() == v + 1, "handing over above the entry is a violation");
+    {
+        /* ...and it gets a row in the site report (#8), the mid-frame one does not. */
+        psp_sp_site rows[16];
+        int n = psp_sp_hist(rows, 16), hi = 0, lo = 0;
+        for (int i = 0; i < n; i++) {
+            if (rows[i].site != 0x08804000u) continue;
+            if (rows[i].delta == 64) hi++;
+            if (rows[i].delta == -2112) lo++;
+        }
+        CHECK(hi == 1 && lo == 0, "a high hand-over is reported by site, a mid-frame one is not");
+    }
 
     v = psp_sp_violations();
 
