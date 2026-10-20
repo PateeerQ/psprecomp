@@ -226,6 +226,15 @@ static void hle_DeleteThread(void) {
  * the clock. */
 static void hle_DelayThread(void)   { psp_ret(SCE_KERNEL_ERROR_OK); }
 
+/* sceKernelSleepThread[CB] blocks until sceKernelWakeupThread -- which, under
+ * a run-to-completion model with no other thread ever scheduled, never
+ * happens. Returning OK immediately is the same approximation DelayThread
+ * already makes (see the file header): a game that sleeps waiting on a
+ * worker thread this host cannot run will still proceed on a wrong timing
+ * assumption, which beats hanging forever and is the same trade-off the
+ * module already accepts for every other blocking primitive here. */
+static void hle_SleepThread(void)   { psp_ret(SCE_KERNEL_ERROR_OK); }
+
 static void hle_WaitThreadEnd(void) {
     /* The thread already ran to completion inside StartThread, so by the time
      * anyone waits on it, it has ended. */
@@ -416,6 +425,8 @@ void psp_threadman_register(void) {
     psp_hle_register(0x9FA03CD3, "ThreadManForUser", "sceKernelDeleteThread",            hle_DeleteThread);
     psp_hle_register(0xCEADEB47, "ThreadManForUser", "sceKernelDelayThread",             hle_DelayThread);
     psp_hle_register(0x68DA9E36, "ThreadManForUser", "sceKernelDelayThreadCB",           hle_DelayThread);
+    psp_hle_register(0x9ACE131E, "ThreadManForUser", "sceKernelSleepThread",             hle_SleepThread);
+    psp_hle_register(0x82826F70, "ThreadManForUser", "sceKernelSleepThreadCB",           hle_SleepThread);
     psp_hle_register(0x278C0DF5, "ThreadManForUser", "sceKernelWaitThreadEnd",           hle_WaitThreadEnd);
     psp_hle_register(0x293B45B8, "ThreadManForUser", "sceKernelGetThreadId",             hle_GetThreadId);
     psp_hle_register(0x9944F31F, "ThreadManForUser", "sceKernelSuspendThread",           hle_SuspendThread);

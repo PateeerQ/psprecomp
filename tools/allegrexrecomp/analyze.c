@@ -519,6 +519,54 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
         }
     }
 
+    /* Harvest lui+addiu/ori immediate-constructed code pointers too. A direct
+     * `jal` is not the only way a function address reaches the program: the
+     * common case this catches is sceKernelCreateThread's second argument --
+     * the real entry point is built as a bare value right before the call
+     * and handed off as data, so it is never a jal target itself (the call
+     * target is the firmware import stub) and the scan above misses it.
+     * Confirmed on this module: `lui $s1,0x882 / addiu $a1,$s1,0x182C` right
+     * before `jal sceKernelCreateThread`, address 0x0882182C never reached
+     * by anything else -- not a relocation, not a jal target, not in any
+     * data table. Any lui whose paired addiu/ori yields an address that is
+     * in range and decodes as valid code is promoted to an entry, same
+     * over-split-is-safe reasoning as everywhere else in this file. */
+    if (an->scan_calls) {
+        uint32_t sbase = an->scan_size ? an->scan_base : an->base;
+        uint32_t ssize = an->scan_size ? an->scan_size : an->size;
+        for (uint32_t off = 0; off + 4 <= ssize; off += 4) {
+            uint32_t a = sbase + off;
+            if (!a_in_range(an, a)) continue;
+            a_insn in;
+            a_decode(fetch(an, a), a, &in);
+            if (in.op != A_LUI) continue;
+
+            for (int k = 1; k <= 4; k++) {
+                uint32_t b = a + (uint32_t)k * 4;
+                if (!a_in_range(an, b)) break;
+                a_insn in2;
+                a_decode(fetch(an, b), b, &in2);
+                if (in2.op == A_LUI && in2.rt == in.rt) break; /* overwritten first */
+                if ((in2.op == A_ADDIU || in2.op == A_ORI) && in2.rs == in.rt) {
+                    uint32_t addr = (in2.op == A_ORI)
+                        ? (((uint32_t)in.imm << 16) | (uint32_t)in2.imm)
+                        : (((uint32_t)in.imm << 16) + (uint32_t)in2.imm);
+                    if (a_in_range(an, addr) && !is_import_stub(an, addr)) {
+                        a_insn probe;
+                        if (a_decode(fetch(an, addr), addr, &probe) && probe.op != A_INVALID) {
+                            uint32_t ti = word_index(an, addr);
+                            if (!entry_map[ti]) {
+                                entry_map[ti] = 1;
+                                u32_push(&queue, addr);
+                            }
+                        }
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     a_func *funcs = NULL;
     int nfuncs = 0, cap = 0;
 
