@@ -177,6 +177,9 @@ library, which means it is implemented, not emulated.
 - [ ] **`sceKernel`** — threads, semaphores, event flags, mutexes, callbacks,
       the memory partitions, timers. Modelled on the MIT-licensed `uofw`
       reference implementation.
+      **Next:** real thread scheduling. Lumberjack now stalls on a semaphore
+      that only a second thread could signal (BRINGUP.md, v0.4.0). #9 proposes
+      it and is in review, pending an MSVC build.
 - [ ] **`sceIo`** — the file API over a host directory standing in for the UMD.
 - [ ] **`sceCtrl`** — the pad, mapped to host input.
 - [ ] **`sceDisplay` + `sceGe`** — the display list processor. The GE is a

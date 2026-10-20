@@ -4347,3 +4347,66 @@ ownership boundaries are emitted, check specifically whether it now transfers
 out of a frame it opened without that frame ever being closed -- the fix
 mirrors what the hardware does at a *shared epilogue*, but a gap whose target is
 not an epilogue has no such guarantee.
+
+# v0.4.0: the object pointer is right, and the stall moves to threading
+
+The integration of the first outside PRs (#2, #3, #4, #5, #7, #8, #10, #11)
+was checked on Lumberjack before it merged. The same `host.c` was emitted and
+run once with `main` and once with the integration branch, with a 90 s cap
+and the 60 s watchdog.
+
+The four calls to `0x00000914` from the previous section, on `main`:
+
+```
+0x00000914 #1: a0=0x00834000 a1=0x08C00020 a2=0x08C00020 a3=0x08003800 ra=0x00074450
+0x00000914 #2: a0=0x00000000 a1=0x09434040 a2=0x09434040 a3=0x08003800 ra=0x00074450
+0x00000914 #3: a0=0x00000030 a1=0x00000000 a2=0x00006021 a3=0x003B3324 ra=0x00074450
+0x00000914 #4: a0=0x00000060 a1=0x00000000 a2=0x09430000 a3=0x0C000137 ra=0x00074450
+```
+
+and with the integration:
+
+```
+0x00000914 #1: a0=0x003FD060 a1=0x08C00020 a2=0x09434020 a3=0x003B0194 ra=0x00074450
+0x00000914 #2: a0=0x003FD090 a1=0x09434040 a2=0x09641040 a3=0x003B019C ra=0x00074450
+0x00000914 #3: a0=0x003FD0C0 a1=0x09641060 a2=0x0973B460 a3=0x003B01A8 ra=0x00074450
+0x00000914 #4: a0=0x003FD0F0 a1=0x0973B480 a2=0x099AC480 a3=0x003B01AC ra=0x00074450
+```
+
+`$s1` now starts at `0x003FD060`, the value `lui $s1,0x40; addiu
+$s1,$s1,-12192` builds, and steps by 48. This section suspected the `-64`
+group, and #11 explains it: a fragment that falls out hands over mid-frame,
+and the frame is returned by its function's last fragment. That group was
+never a leak. The value was lost at the fall-outs that #7 and #10 now
+continue correctly. Which of the two fixes the case alone was not measured.
+
+| | `main` | v0.4.0 integration |
+|---|---|---|
+| calls dispatched | 20,000,000 (budget exhausted) | 2,137 |
+| dispatch misses | 31 | 0 |
+| bad memory accesses | 253,106,458 | 0 |
+| end of run | call budget exhausted | watchdog, in a wait loop |
+
+On `main`, the 20 million calls were the game running on corrupted state. The
+new run makes fewer calls, all on correct state, and then stops here:
+
+```
+psprecomp: sceKernelWaitSema would block, returning timeout.
+  The thread model runs one thread to completion (see src/hle/threadman.c);
+  there is no other thread to yield to. Further blocks are not reported.
+
+--- watchdog fired: still running, not progressing ---
+```
+
+## Next
+
+The game waits on a semaphore that another thread would signal, and under
+run-to-completion there is no other thread. `threadman.c`'s header names this
+as the case that would justify real scheduling. #9 (real threads, one CPU
+handed over explicitly) is that change. It is in review and needs an MSVC
+build before it can be measured here.
+
+The run reports 1.8 million stack-balance violations. Every one that was
+printed is a positive delta (`+16` at `0x0004D824` first), the known
+split-continuation shape. `psp_sp_hist()` (#8) gives the full breakdown by
+site.

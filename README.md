@@ -159,6 +159,8 @@ static void psp_body_0000E06C(uint32_t _entry) {
 
 ## Status
 
+**v0.4.0 — alpha.** See the [CHANGELOG](CHANGELOG.md).
+
 **A retail PSP game recompiles to C that compiles, links, and executes.**
 It does not yet render. Being specific about which parts are real:
 
@@ -167,14 +169,14 @@ It does not yet render. Being specific about which parts are real:
 | **Container stack** | ✅ Complete | ISO9660, PBP, `~PSP`/`~SCE`, ELF/PRX — `info` recurses the whole stack |
 | **Decryption** | ✅ Complete | KIRK AES-CBC with two CMACs; key tag read from the right offset, verified against published tooling |
 | **Allegrex decoder** | ✅ Complete | MIPS32r2 + Sony extensions + COP1 + VFPU, including the prefix instructions |
-| **Function discovery** | ✅ Working | Fixpoint walk over exports, relocations and jump tables — 5,849 functions in the flagship module, 92% of `.text` |
+| **Function discovery** | ✅ Working | Fixpoint walk over exports, relocations, jump tables and `lui`+`addiu` code pointers — 6,935 functions in the flagship module, 92% of `.text` |
 | **C emitter** | ✅ Working | Every discovered function, every label individually dispatchable (13,682 entries) — computed jumps resolve by construction |
 | **Runtime** | ✅ Working | Register file, memory map with cache mirrors, dispatch, static constructors |
 | **VFPU** | 🔨 Partial | Arithmetic, matrix ops, constants, immediates, prefixes. 108 of 137,748 instructions still trap (0.08%) |
 | **HLE firmware** | 🔨 Partial | 112 registrations across sysmem, threadman, GE, display, sascore, io, ctrl. Every NID verified against SHA-1 of its own name |
 | **GE rasterizer** | 🔨 Partial | Triangles, strips, sprites in through-mode; six tests assert *where* pixels land. Transformed geometry counted, not drawn |
-| **Threading** | ❌ Not started | Run-to-completion only; no scheduler |
-| **A game on screen** | ❌ Not yet | The flagship reaches its allocator and stalls in start-up. See [BRINGUP.md](docs/BRINGUP.md) |
+| **Threading** | ❌ Not started | Run-to-completion only; no scheduler. Real threads are in review (#9) |
+| **A game on screen** | ❌ Not yet | The flagship gets through start-up with 0 bad memory accesses and 0 dispatch misses, then waits on a thread the run-to-completion model cannot schedule. See [BRINGUP.md](docs/BRINGUP.md) |
 
 ### Bring-up instruments
 
@@ -212,6 +214,8 @@ program, and both producing plausible values rather than visible failures:
 | **[Recompiler](docs/RECOMPILER.md)** | Discovery, emission, delay slots, jump tables |
 | **[VFPU](docs/VFPU.md)** | Register aliasing, prefix instructions, matrix layout |
 | **[Oracle](docs/ORACLE.md)** | How emulators are used as references without being linked |
+| **[Changelog](CHANGELOG.md)** | What landed in each version, and who it came from |
+| **[Contributing](CONTRIBUTING.md)** | Building, testing, what a PR needs, and where your code may come from |
 | **[Bring-up log](docs/BRINGUP.md)** | The full investigation record — every finding, **and every retraction** |
 
 `BRINGUP.md` is worth singling out. It records the wrong turns as prominently
@@ -286,6 +290,12 @@ Neither can be linked into an MIT toolkit, and neither needs to be:
 Same arrangement `ps3recomp` has with RPCS3 and `lynxrecomp` has with Handy: the
 emulator is a thing you *diff against*, never a thing you link. See
 [docs/ORACLE.md](docs/ORACLE.md).
+
+## Contributors
+
+psprecomp is built by more than one person. See
+**[CONTRIBUTORS.md](CONTRIBUTORS.md)** for who did what, in technical detail.
+Outside PRs are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) says how.
 
 ## Legal
 
