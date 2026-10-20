@@ -295,8 +295,8 @@ static void check_slot_of_another_body(void) {
                             "the not-taken path continues at the delay slot");
             expect_contains(src, "psp_func_08804008();",
                             "and reaches it as a function, which is what it is");
-            expect_contains(src, "PSP_SP_CHECK(0x08804008u);",
-                            "with the stack observed across the call");
+            expect_contains(src, "PSP_SP_LEAVE(0x08804008u);",
+                            "with the stack observed as a hand-over (#11)");
             const char *cond = strstr(src, "int _c = (r_v0 == r_zero);");
             const char *call = strstr(src, "psp_func_08804008();");
             CHECK(cond && call && cond < call,
