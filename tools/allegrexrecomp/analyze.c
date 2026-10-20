@@ -551,7 +551,11 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
                     uint32_t addr = (in2.op == A_ORI)
                         ? (((uint32_t)in.imm << 16) | (uint32_t)in2.imm)
                         : (((uint32_t)in.imm << 16) + (uint32_t)in2.imm);
-                    if (a_in_range(an, addr) && !is_import_stub(an, addr)) {
+                    /* The target must be in the scanned range too, not just
+                     * the image: lui+addiu builds far more data pointers than
+                     * code pointers, and nearly any data word decodes. */
+                    if (a_in_range(an, addr) && !is_import_stub(an, addr) &&
+                        addr - sbase < ssize) {
                         a_insn probe;
                         if (a_decode(fetch(an, addr), addr, &probe) && probe.op != A_INVALID) {
                             uint32_t ti = word_index(an, addr);
