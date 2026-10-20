@@ -7,6 +7,7 @@
  */
 
 #include "psprecomp/recomp_rt.h"
+#include "psprecomp/dispatch.h"
 
 #include <stdio.h>
 
@@ -194,6 +195,58 @@ static void test_unaligned(void) {
     psp_mem_free();
 }
 
+/* The stack report has to be readable at the volume a real game reaches. Two
+ * properties make it so, and both are invisible without a test: a balanced
+ * check costs nothing, and the largest magnitude is the FIRST row whatever
+ * order the imbalances arrived in -- otherwise a -656 entry hides behind a
+ * crowd of +16s, which is exactly what happened on LocoRoco (24 printed lines,
+ * all small, while the run was losing 656 bytes per frame). */
+static void test_sp_histogram(void) {
+    psp_trace_sp(0x08801000u, 0x00001000u, 0x00001000u);   /* balanced */
+    psp_trace_sp(0x08801000u, 0x00001000u, 0x00001010u);   /* +16 */
+    psp_trace_sp(0x08801000u, 0x00001000u, 0x00001010u);   /* +16 again */
+    psp_trace_sp(0x08801004u, 0x00001000u, 0x00000F00u);   /* -256, the leak */
+    psp_trace_sp(0x08801008u, 0x00001000u, 0x00001020u);   /* +32 */
+
+    psp_sp_site rows[8];
+    int n = psp_sp_hist(rows, 8);
+    CHECK(n == 3, "a balanced check is not recorded; three sites remain (got %d)", n);
+    if (n < 3) return;
+
+    CHECK_EQ(rows[0].site, 0x08801004u, "the largest magnitude comes first");
+    CHECK_EQ((uint32_t)rows[0].delta, (uint32_t)-256, "and it is the leak, sign kept");
+    CHECK_EQ(rows[0].count, 1, "its count is its own");
+    CHECK_EQ(rows[1].delta, 32, "then +32");
+    CHECK_EQ(rows[2].delta, 16, "then +16");
+
+    for (int i = 0; i < n; i++) {
+        if (rows[i].site == 0x08801000u && rows[i].delta == 16) {
+            CHECK_EQ(rows[i].count, 2,
+                     "the same (site, delta) twice is one row with count 2");
+            CHECK_EQ(rows[i].in, 0x00001000u, "the first $sp expected is kept");
+            CHECK_EQ(rows[i].out, 0x00001010u, "and the first $sp observed");
+            return;
+        }
+    }
+    CHECK(0, "the +16 row is missing");
+}
+
+/* $sp across a call is a different observation from $sp across a body, and the
+ * report keeps them apart: one names the callee, the other the body. */
+static void test_sp_call_histogram(void) {
+    psp_trace_sp_call(0x08802000u, 0x00002000u, 0x00002000u);   /* balanced */
+    psp_trace_sp_call(0x08802004u, 0x00002000u, 0x00001F00u);   /* -256 */
+    psp_trace_sp_call(0x08802008u, 0x00002000u, 0x00002040u);   /* +64 */
+
+    psp_sp_site rows[4];
+    int n = psp_sp_call_hist(rows, 4);
+    CHECK(n == 2, "a balanced call is not recorded (got %d)", n);
+    if (n < 2) return;
+    CHECK_EQ(rows[0].site, 0x08802004u, "the callee that lost 256 bytes is named first");
+    CHECK_EQ((uint32_t)rows[0].delta, (uint32_t)-256, "with its sign");
+    CHECK_EQ(rows[1].delta, 64, "then the +64 next to it");
+}
+
 int main(void) {
     test_zero_register();
     test_division();
@@ -202,6 +255,8 @@ int main(void) {
     test_bitops();
     test_memory();
     test_unaligned();
+    test_sp_histogram();
+    test_sp_call_histogram();
 
     if (failures) {
         printf("\n%d check(s) failed\n", failures);
