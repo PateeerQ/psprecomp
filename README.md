@@ -262,7 +262,9 @@ game-sharing PBP reports the inner module's name, size and key tag in one go.
 
 > **No game data here.** Disc images, `EBOOT.BIN`, PRX modules and PSP
 > decryption keys are all `.gitignore`d. This repo is the recompiler, the
-> runtime, and the docs — bring your own UMD or PSN dump.
+> runtime, and the docs — bring your own UMD or PSN dump. The C that `emit`
+> generates is derived from your game and is never distributed; the emitted
+> file patterns are `.gitignore`d too.
 
 ## Game Ports Using psprecomp
 

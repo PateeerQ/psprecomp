@@ -57,3 +57,10 @@ Thumbs.db
 *.bmp
 *.wav
 *.log
+
+# Emitted C is derived from a game binary: never committed.
+gen/
+*_funcs.h
+*_funcs_[0-9][0-9][0-9].c
+*_imports.c
+*_register.c
