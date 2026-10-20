@@ -600,8 +600,10 @@ static char *emit_synthetic(const char *prefix, const uint32_t *words, size_t nw
     }
 
     char path[128];
-    snprintf(path, sizeof path, "./%s_funcs.c", prefix);
-    return slurp(path, NULL);
+    snprintf(path, sizeof path, "./%s_funcs_000.c", prefix);
+    char *src = slurp(path, NULL);
+    CHECK(src != NULL, "%s: generated unit 000 is readable", prefix);
+    return src;
 }
 
 /* The transfer must END the body: skip the whitespace that follows the call and
@@ -610,7 +612,7 @@ static void expect_tail_transfer(const char *src, const char *call, const char *
     const char *p = strstr(src, call);
     if (!p) { printf("FAIL %s\n  no such call emitted: %s\n", why, call); failures++; return; }
     const char *q = p + strlen(call);
-    while (*q == ' ' || *q == '\t' || *q == '\n') q++;
+    while (*q == ' ' || *q == '\t' || *q == '\r' || *q == '\n') q++;
     if (strncmp(q, "return;", 7) != 0 && *q != '}') {
         printf("FAIL %s\n  a statement follows the transfer, so it cannot stay a "
                "tail jump: %.40s\n", why, q);
