@@ -6,6 +6,9 @@
  *
  * ## The execution model
  *
+ * Default: StartThread runs inline, and unsatisfied waits return a timeout.
+ * PSPRECOMP_REAL_THREADS opts into the experimental model described below.
+ *
  * Recompiled functions are ordinary C functions over one register file
  * (`psp_cpu`), so the PSP thread model has to be built out of host threads.
  * What this implements, and why it looks the way it does:
@@ -22,16 +25,17 @@
  *     faithful and the thing that keeps the shared register file coherent:
  *     whoever holds the baton owns `psp_cpu`, and a thread that gives up the
  *     CPU first saves its registers into its own record and reloads them when
- *     it gets the CPU back. A per-thread `_Thread_local psp_cpu` would be the
+ *     it gets the CPU back. A per-thread `HOST_TLS psp_cpu` would be the
  *     other way to do it, and would put a TLS lookup on every register access
  *     in millions of lines of generated code.
- *   - **Blocking calls really block.** `SleepThread` parks until
- *     `sceKernelWakeupThread`, `WaitSema`/`WaitEventFlag` park until signalled,
+ *   - **Waits hand off the CPU.** `SleepThread` parks for one tick (or a
+ *     wakeup), `WaitSema`/`WaitEventFlag` retry until signalled or timed out,
  *     `WaitThreadEnd` parks until the target exits, `DelayThread` parks for its
  *     duration (in virtual time -- see the clock below).
  *   - **A wait is also where time passes**, so it is where an interrupt is
  *     delivered (src/hle/intrman.c) and where other threads get the CPU. An
- *     unbounded wait is therefore capped at a tick: a thread parked on a flag
+ *     unbounded wait is retried for at most WAIT_TICKS_MAX ticks: a thread
+ *     parked on a flag
  *     that nothing will ever set re-checks it every tick instead of deadlocking
  *     the whole run. That is a deliberate approximation -- the faithful
  *     alternative is a run that stops with no evidence in it.
@@ -42,7 +46,8 @@
  * and a park of an unbounded duration advances it a tick at a time. Real time
  * is capped (`REAL_TICK_US`) so that a game asking for a 100 ms delay does not
  * make a 30 s bring-up run take minutes. 1 ms of guest time therefore costs at
- * most 400 us of host time; the ratio is not a promise about speed, it is a
+ * most 400 us per host condition wait on POSIX (rounded up to milliseconds
+ * on Windows), excluding CPU handover and host scheduling latency. This is a
  * choice about which resource is scarce during bring-up.
  *
  * ## Host stacks
@@ -60,7 +65,11 @@
 
 #include <errno.h>
 #include <stdlib.h>
-#include <pthread.h>
+#if PSPRECOMP_REAL_THREADS
+#include "host_thread.h"
+#else
+#define HOST_TLS
+#endif
 #include <setjmp.h>
 #include <stdio.h>
 #include <string.h>
@@ -121,18 +130,21 @@ typedef struct {
     /* Where this thread's registers live while it does not hold the CPU. */
     psp_cpu_state ctx;
 
-    pthread_t host;        /* the host thread carrying it, once started */
+#if PSPRECOMP_REAL_THREADS
+    host_thread host;        /* the host thread carrying it, once started */
     int       host_live;
 
     /* Parked state. `wlock` guards the two fields below; a waker takes it for
      * as long as it takes to set `woken`, so a wakeup cannot land between a
      * thread deciding to park and actually parking. */
-    pthread_mutex_t wlock;
-    pthread_cond_t  wcv;
+    host_mutex wlock;
+    host_cond  wcv;
     int             wlock_ready;
+    int             woken;        /* consumed by the park */
+    int             host_joinable;
+#endif
     int             waiting;      /* 1 while parked */
     int             wait_kind;
-    int             woken;        /* consumed by the park */
 
     uint64_t wakeups;             /* sceKernelWakeupThread, not yet consumed */
     uint64_t parks;
@@ -214,7 +226,7 @@ static psp_thread  *g_current;      /* whose registers are in psp_cpu, or NULL *
  * thread that is ending clears g_current, and the next thread to run is then
  * left with no idea which record is its own -- which silently turns every park
  * into a no-op instead of a block. Measured, on the second guest thread. */
-static _Thread_local psp_thread *g_tls_me;
+static HOST_TLS psp_thread *g_tls_me;
 
 /* ---- the baton ------------------------------------------------------------
  *
@@ -226,10 +238,10 @@ static _Thread_local psp_thread *g_tls_me;
  * main) owns it from the start: it is running the module entry before any
  * guest thread exists.
  */
-static pthread_mutex_t g_baton_m  = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  g_baton_cv = PTHREAD_COND_INITIALIZER;
+#if PSPRECOMP_REAL_THREADS
+static host_mutex g_baton_m  = HOST_MUTEX_INIT;
+static host_cond  g_baton_cv = HOST_COND_INIT;
 static int             g_baton_owned;
-static pthread_t       g_baton_owner;
 
 /* Host threads sitting in baton_acquire, i.e. wanting the CPU right now. A
  * parker reads it to decide whether it may take the CPU back (see the handover
@@ -237,12 +249,15 @@ static pthread_t       g_baton_owner;
  * the baton as soon as it is free -- the wait cannot be a deadlock. */
 static int             g_baton_waiters;
 static uint64_t        g_baton_takes;      /* every acquisition, by anyone */
+#endif
 static uint64_t        g_handovers;        /* parks that handed the CPU over */
 static uint64_t        g_handovers_expired;
 
 /* Per host thread, so a nested park (an interrupt handler that waits) restores
  * its outer nesting on the way back. */
-static _Thread_local int g_tls_depth;
+static HOST_TLS int g_tls_depth;
+static HOST_TLS int g_tls_intr_depth;
+static uint64_t g_created, g_started;
 
 static uint64_t g_switches;         /* baton handovers */
 static uint64_t g_parks;
@@ -251,17 +266,22 @@ static uint64_t g_vtime_us;         /* see the clock note above */
 static uint64_t g_epoch_us;         /* wall clock at reset, so time never stops */
 
 static uint64_t host_now_us(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    return (uint64_t)ts.tv_sec * 1000000ull + (uint64_t)(ts.tv_nsec / 1000);
+#if PSPRECOMP_REAL_THREADS
+    return host_epoch_us();
+#else
+    return (uint64_t)time(NULL) * 1000000ull;
+#endif
 }
 
 /* The handovers, one line each, on request: PSPRECOMP_TRACE_SCHED=1. Bounded,
  * and the bound announces itself -- a trace that goes quiet has to be
  * distinguishable from one that was silenced. */
 #define SCHED_TRACE_MAX 2000
-static int g_trace_sched, g_trace_init;
+static int g_trace_sched;
+#if PSPRECOMP_REAL_THREADS
+static int g_trace_init;
 static uint64_t g_trace_n;
+#endif
 #define TRACE_SCHED(...) do { \
     if (!g_trace_init) { g_trace_init = 1; const char *v_ = getenv("PSPRECOMP_TRACE_SCHED"); g_trace_sched = v_ && v_[0] == '1'; } \
     if (g_trace_sched && g_trace_n < SCHED_TRACE_MAX) { \
@@ -273,33 +293,32 @@ static uint64_t g_trace_n;
     } \
 } while (0)
 
+#if PSPRECOMP_REAL_THREADS
 static void baton_acquire(void) {
     if (g_tls_depth > 0) { g_tls_depth++; return; }   /* already ours */
-    pthread_mutex_lock(&g_baton_m);
-    TRACE_SCHED("acquire: owned=%d by other\n", g_baton_owned);
+    host_mutex_lock(&g_baton_m);
     g_baton_waiters++;
-    while (g_baton_owned) pthread_cond_wait(&g_baton_cv, &g_baton_m);
+    while (g_baton_owned) host_cond_wait(&g_baton_cv, &g_baton_m);
     g_baton_waiters--;
     g_baton_owned = 1;
-    g_baton_owner = pthread_self();
     g_baton_takes++;
     g_tls_depth = 1;
     g_switches++;
     /* Whoever is holding a park open for a handover has just got what it was
      * waiting for. */
-    pthread_cond_broadcast(&g_baton_cv);
+    host_cond_broadcast(&g_baton_cv);
     TRACE_SCHED("acquired\n");
-    pthread_mutex_unlock(&g_baton_m);
+    host_mutex_unlock(&g_baton_m);
 }
 
 static void baton_release(void) {
     if (g_tls_depth == 0) return;
     if (--g_tls_depth) return;
-    pthread_mutex_lock(&g_baton_m);
+    host_mutex_lock(&g_baton_m);
     g_baton_owned = 0;
-    pthread_cond_broadcast(&g_baton_cv);
-    pthread_mutex_unlock(&g_baton_m);
+    host_cond_broadcast(&g_baton_cv);
     TRACE_SCHED("release\n");
+    host_mutex_unlock(&g_baton_m);
 }
 
 /* Is anyone waiting for the CPU? Two shapes, and both are certain to take it:
@@ -308,7 +327,10 @@ static void baton_release(void) {
  * that lets them go first cannot be left waiting for an event that never
  * comes. */
 static int cpu_wanted_locked(void) {
-    if (g_baton_waiters > 0) return 1;
+    /* Guest records may change while another guest owns the CPU. Do not
+     * inspect them until the baton is free (all mutations then happen-before
+     * this lock acquisition). */
+    if (g_baton_owned || g_baton_waiters > 0) return 1;
     for (int i = 0; i < MAX_THREADS; i++)
         if (g_thread[i].used && g_thread[i].cpu_pending) return 1;
     return 0;
@@ -331,25 +353,15 @@ static int cpu_wanted_locked(void) {
  * wait that was never needed. In practice this resolves in microseconds --
  * the thread it waits for is already blocked on the baton. */
 #define HANDOVER_CAP_US 20000    /* 20 ms of host time */
-static void handover_wait_locked(void) {
-    struct timespec dl;
-    clock_gettime(CLOCK_REALTIME, &dl);
-    uint64_t ns = (uint64_t)dl.tv_nsec + (uint64_t)HANDOVER_CAP_US * 1000ull;
-    dl.tv_sec  += (time_t)(ns / 1000000000ull);
-    dl.tv_nsec  = (long)(ns % 1000000000ull);
+static int handover_wait_locked(void) {
+    uint64_t dl = host_deadline_us() + HANDOVER_CAP_US;
 
     while (cpu_wanted_locked()) {
-        if (pthread_cond_timedwait(&g_baton_cv, &g_baton_m, &dl) == ETIMEDOUT) {
-            if (g_handovers_expired++ < 1)
-                fprintf(stderr,
-                        "psprecomp: a park waited %d ms to hand the CPU over and gave up"
-                        " -- the thread it waited for was not scheduled. The run continues;"
-                        " further expiries are counted, not printed"
-                        " (psp_threadman_handover_expired())\n",
-                        HANDOVER_CAP_US / 1000);
-            break;
+        if (host_cond_until(&g_baton_cv, &g_baton_m, dl)) {
+            return 1;
         }
     }
+    return 0;
 }
 
 /* Give the CPU away and wait to be woken, or for `timeout_us` of *virtual*
@@ -364,35 +376,31 @@ static int park_us(uint64_t timeout_us) {
     if (t) {
         t->ctx = psp_cpu;               /* this IS the context switch */
         g_current = NULL;
-        pthread_mutex_lock(&t->wlock);
+        host_mutex_lock(&t->wlock);
         t->waiting = 1;
         t->woken = 0;
-        pthread_mutex_unlock(&t->wlock);
+        host_mutex_unlock(&t->wlock);
     }
 
     TRACE_SCHED("park enter: depth=%d t=%s\n", depth, t ? t->name : "(none)");
     uint64_t takes0 = 0;
     if (depth) {                        /* give the CPU away, however nested */
-        pthread_mutex_lock(&g_baton_m);
+        host_mutex_lock(&g_baton_m);
         takes0 = g_baton_takes;         /* to see, below, whether anyone ran */
         g_baton_owned = 0;
-        pthread_cond_broadcast(&g_baton_cv);
-        pthread_mutex_unlock(&g_baton_m);
+        host_cond_broadcast(&g_baton_cv);
+        host_mutex_unlock(&g_baton_m);
         g_tls_depth = 0;
     }
 
     int woken = 0;
     if (t) {
         uint64_t real = timeout_us < REAL_TICK_US ? timeout_us : REAL_TICK_US;
-        pthread_mutex_lock(&t->wlock);
+        host_mutex_lock(&t->wlock);
         if (!t->woken) {
-            struct timespec dl;
-            clock_gettime(CLOCK_REALTIME, &dl);
-            uint64_t ns = (uint64_t)dl.tv_nsec + real * 1000ull;
-            dl.tv_sec += (time_t)(ns / 1000000000ull);
-            dl.tv_nsec = (long)(ns % 1000000000ull);
+            uint64_t dl = host_deadline_us() + real;
             while (!t->woken) {
-                if (pthread_cond_timedwait(&t->wcv, &t->wlock, &dl) == ETIMEDOUT)
+                if (host_cond_until(&t->wcv, &t->wlock, dl))
                     break;
             }
         }
@@ -400,46 +408,56 @@ static int park_us(uint64_t timeout_us) {
         t->woken = 0;
         t->waiting = 0;
         t->wait_kind = W_NONE;
-        t->parks++;
-        pthread_mutex_unlock(&t->wlock);
+        host_mutex_unlock(&t->wlock);
     }
 
-    if (timeout_us) g_vtime_us += timeout_us;
-    g_parks++;
-
     if (depth) {
-        pthread_mutex_lock(&g_baton_m);
+        host_mutex_lock(&g_baton_m);
         /* The handover, before the CPU is taken back: a started thread that has
          * never run, or a host thread already queued for the baton, goes first.
          * Without this the re-acquire below is a race with the host's scheduler
          * -- see handover_wait_locked(). */
         int handed = (g_baton_takes != takes0);   /* someone ran while we were parked */
-        if (cpu_wanted_locked()) { handover_wait_locked(); handed = 1; }
-        if (handed) g_handovers++;
-        while (g_baton_owned) pthread_cond_wait(&g_baton_cv, &g_baton_m);
+        int expired = 0;
+        if (cpu_wanted_locked()) { expired = handover_wait_locked(); handed = 1; }
+        while (g_baton_owned) host_cond_wait(&g_baton_cv, &g_baton_m);
         g_baton_owned = 1;
-        g_baton_owner = pthread_self();
         g_switches++;
-        pthread_mutex_unlock(&g_baton_m);
+        host_mutex_unlock(&g_baton_m);
         g_tls_depth = depth;
+        if (handed) g_handovers++;
+        if (expired && g_handovers_expired++ == 0)
+            fprintf(stderr, "psprecomp: CPU handover exceeded %d ms; further expiries are counted\n",
+                    HANDOVER_CAP_US / 1000);
     }
 
-    if (t) { psp_cpu = t->ctx; g_current = t; }
+    if (timeout_us) g_vtime_us += timeout_us;
+    g_parks++;
+    if (t) { t->parks++; psp_cpu = t->ctx; g_current = t; }
     TRACE_SCHED("park done: %s woken=%d\n", t ? t->name : "(none)", woken);
     return woken;
 }
+
+#else
+/* Inline mode has no host threads and never waits in real time. */
+static int park_us(uint64_t timeout_us) {
+    g_vtime_us += timeout_us;
+    return 0;
+}
+#endif
 
 static void trace_sched_enable(void) {
     const char *v = getenv("PSPRECOMP_TRACE_SCHED");
     g_trace_sched = v && v[0] == '1';
 }
 
+#if PSPRECOMP_REAL_THREADS
 static void wake_thread(psp_thread *t) {
     if (!t->wlock_ready) return;
-    pthread_mutex_lock(&t->wlock);
+    host_mutex_lock(&t->wlock);
     t->woken = 1;
-    pthread_cond_signal(&t->wcv);
-    pthread_mutex_unlock(&t->wlock);
+    host_cond_signal(&t->wcv);
+    host_mutex_unlock(&t->wlock);
 }
 
 /* Wake everyone parked on `kind`. Called by whoever holds the baton, from the
@@ -448,27 +466,37 @@ static void wake_waiters(int kind) {
     for (int i = 0; i < MAX_THREADS; i++) {
         psp_thread *t = &g_thread[i];
         if (!t->used || !t->wlock_ready) continue;
-        pthread_mutex_lock(&t->wlock);
+        host_mutex_lock(&t->wlock);
         int hit = t->waiting && t->wait_kind == kind;
-        pthread_mutex_unlock(&t->wlock);
+        host_mutex_unlock(&t->wlock);
         if (hit) wake_thread(t);
     }
 }
+
+#else
+static void wake_thread(psp_thread *t) { (void)t; }
+static void wake_waiters(int kind) { (void)kind; }
+#endif
 
 /* Every park used by a wait goes through here, so that "time passes, another
  * thread runs, an interrupt may be delivered" is one thing rather than five
  * copies of it. */
 static void park_for(int kind, uint64_t timeout_us) {
     psp_thread *t = g_tls_me;
+
+#if PSPRECOMP_REAL_THREADS
     if (t) {
-        pthread_mutex_lock(&t->wlock);
+        host_mutex_lock(&t->wlock);
         t->wait_kind = kind;
-        pthread_mutex_unlock(&t->wlock);
+        host_mutex_unlock(&t->wlock);
         if (t->parks < 2)
             fprintf(stderr, "thread %u parks  : %s (virtual time %llu us)\n",
                     t->uid, wait_name(kind), (unsigned long long)g_vtime_us);
         t->last_wait_kind = (uint32_t)kind;
     }
+#else
+    (void)t; (void)kind;
+#endif
     park_us(timeout_us);
 }
 
@@ -477,6 +505,25 @@ static void park_for(int kind, uint64_t timeout_us) {
 static void boot_record(void);
 
 void psp_threadman_reset(void) {
+#if PSPRECOMP_REAL_THREADS
+    /* Reset is a quiescent-host operation, not asynchronous cancellation.
+     * Never overwrite a live thread's locks or free memory it can still use. */
+    for (int i = 0; i < MAX_THREADS - 1; i++) {
+        if (g_thread[i].host_live) {
+            fputs("psprecomp: reset requires all guest threads to have ended\n", stderr);
+            abort();
+        }
+        if (g_thread[i].host_joinable) host_thread_join(g_thread[i].host);
+    }
+    for (int i = 0; i < MAX_THREADS; i++) {
+        if (g_thread[i].wlock_ready) {
+            host_cond_destroy(&g_thread[i].wcv);
+            host_mutex_destroy(&g_thread[i].wlock);
+        }
+    }
+#endif
+    g_tls_me = NULL;
+    g_current = NULL;
     memset(g_thread, 0, sizeof g_thread);
     memset(g_sema, 0, sizeof g_sema);
     memset(g_flag, 0, sizeof g_flag);
@@ -497,12 +544,17 @@ void psp_threadman_reset(void) {
     g_vtime_us = 0;
     g_epoch_us = host_now_us();
 
+#if PSPRECOMP_REAL_THREADS
     /* The caller is running the module entry: it holds the CPU from here. */
-    pthread_mutex_lock(&g_baton_m);
+    host_mutex_lock(&g_baton_m);
     g_baton_owned = 1;
-    g_baton_owner = pthread_self();
-    pthread_mutex_unlock(&g_baton_m);
+    host_mutex_unlock(&g_baton_m);
+    g_baton_waiters = 0;
+    g_baton_takes = 0;
+#endif
     g_tls_depth = 1;
+    g_created = g_started = 0;
+    g_tls_intr_depth = 0;
 
     boot_record();
 }
@@ -521,10 +573,12 @@ static void boot_record(void) {
     snprintf(t->name, sizeof t->name, "boot");
     t->state = TH_RUNNING;
     t->used = 1;
-    t->host_live = 1;
-    pthread_mutex_init(&t->wlock, NULL);
-    pthread_cond_init(&t->wcv, NULL);
+
+#if PSPRECOMP_REAL_THREADS
+    host_mutex_init(&t->wlock);
+    host_cond_init(&t->wcv);
     t->wlock_ready = 1;
+#endif
     g_tls_me = t;
     g_current = t;
 }
@@ -556,12 +610,19 @@ void psp_threadman_dump(FILE *out) {
     for (int i = 0; i < MAX_THREADS; i++) {
         psp_thread *t = &g_thread[i];
         if (!t->used) continue;
+#if PSPRECOMP_REAL_THREADS
+        host_mutex_lock(&t->wlock);
+#endif
+        const char *wait = t->waiting ? wait_name(t->wait_kind) : "on CPU";
+#if PSPRECOMP_REAL_THREADS
+        host_mutex_unlock(&t->wlock);
+#endif
         fprintf(out, "  thread %u %-16s %-9s %s, parks %llu, wakeups %llu%s\n",
                 t->uid, t->name,
                 t->state == TH_RUNNING ? "running" :
                 t->state == TH_SUSPENDED ? "suspended" :
                 t->state == TH_READY ? "ready" : "dormant",
-                t->waiting ? wait_name(t->wait_kind) : "on CPU",
+                wait,
                 (unsigned long long)t->parks,
                 (unsigned long long)t->wakeups,
                 t->exited ? ", exited" : "");
@@ -574,7 +635,6 @@ void psp_threadman_dump(FILE *out) {
  * The cookie is the previous state, which is what the guest passes back to
  * ResumeIntr -- and which is why resuming a nested suspend does not enable
  * interrupts. */
-static _Thread_local int g_tls_intr_depth;
 
 int psp_threadman_intr_suspend(void) {
     int was = g_tls_intr_depth == 0;
@@ -594,7 +654,6 @@ int psp_threadman_intr_disabled(void) { return g_tls_intr_depth > 0; }
 /* Threads are few per run, so every one is named rather than counted silently:
  * "was the worker ever started?" is the question that decides whether a wait
  * can end at all, and a driver that only reports a total cannot answer it. */
-static uint64_t g_created, g_started;
 
 static psp_thread *find_thread(uint32_t id) {
     for (int i = 0; i < MAX_THREADS; i++)
@@ -628,6 +687,11 @@ static void check_terminated(void) {
 #define WAIT_TICKS_MAX 500
 
 static void warn_wait(const char *what, const char *name) {
+#if !PSPRECOMP_REAL_THREADS
+    if (g_wait_gaveup++ == 0)
+        fprintf(stderr, "psprecomp: %s would block in inline mode; returning timeout\n", what);
+    (void)name;
+#else
     if (g_wait_gaveup < 8)
         fprintf(stderr,
                 "psprecomp: %s%s%s waited %llu ticks with nothing to wake it,"
@@ -635,6 +699,7 @@ static void warn_wait(const char *what, const char *name) {
                 what, (name && name[0]) ? " '" : "", (name && name[0]) ? name : "",
                 (unsigned long long)WAIT_TICKS_MAX);
     g_wait_gaveup++;
+#endif
 }
 
 /* Re-check the condition, deliver an interrupt, park for a tick -- until the
@@ -648,6 +713,11 @@ static uint32_t wait_loop(int (*ready)(void *), void *ctx, uint64_t timeout_us,
     for (;;) {
         deliver_tick();
         if (ready(ctx)) return SCE_KERNEL_ERROR_OK;
+#if !PSPRECOMP_REAL_THREADS
+        /* No other guest can make progress while this inline call is active. */
+        warn_wait(what, name);
+        return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+#endif
         check_terminated();
         if (deadline && g_vtime_us >= deadline) return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
         if (!deadline && ++ticks > WAIT_TICKS_MAX) {
@@ -661,6 +731,7 @@ static uint32_t wait_loop(int (*ready)(void *), void *ctx, uint64_t timeout_us,
     }
 }
 
+#if PSPRECOMP_REAL_THREADS
 static void *guest_thread_main(void *arg) {
     psp_thread *t = (psp_thread *)arg;
 
@@ -682,10 +753,10 @@ static void *guest_thread_main(void *arg) {
     t->state = TH_RUNNING;
     /* We have the CPU: the flag that says "started, never run" is cleared by the
      * thread itself, and whoever was holding a park open for it is told. */
-    pthread_mutex_lock(&g_baton_m);
+    host_mutex_lock(&g_baton_m);
     t->cpu_pending = 0;
-    pthread_cond_broadcast(&g_baton_cv);
-    pthread_mutex_unlock(&g_baton_m);
+    host_cond_broadcast(&g_baton_cv);
+    host_mutex_unlock(&g_baton_m);
     g_started++;
     fprintf(stderr, "thread %u started : entry 0x%08X\n", t->uid, t->entry);
 
@@ -721,6 +792,8 @@ static void *guest_thread_main(void *arg) {
     return NULL;
 }
 
+#endif
+
 static void hle_CreateThread(void) {
     /* (name, entry, priority, stackSize, attr, option) */
     psp_thread *t = NULL;
@@ -744,9 +817,12 @@ static void hle_CreateThread(void) {
     t->uid = g_next_uid++;
     t->state = TH_DORMANT;
     t->used = 1;
-    pthread_mutex_init(&t->wlock, NULL);
-    pthread_cond_init(&t->wcv, NULL);
+
+#if PSPRECOMP_REAL_THREADS
+    host_mutex_init(&t->wlock);
+    host_cond_init(&t->wcv);
     t->wlock_ready = 1;
+#endif
     g_created++;
     fprintf(stderr, "thread %u created : entry 0x%08X stack %u  (%s)\n",
             t->uid, t->entry, t->stack_size, t->name);
@@ -757,7 +833,47 @@ static void hle_StartThread(void) {
     /* (thid, arglen, argp) */
     psp_thread *t = find_thread(psp_arg(0));
     if (!t) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_THID); return; }
+#if PSPRECOMP_REAL_THREADS
     if (t->host_live) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_THID); return; }
+    if (t->host_joinable) {
+        host_thread_join(t->host);
+        t->host_joinable = 0;
+    }
+#else
+    if (t->state == TH_RUNNING) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_THID); return; }
+    psp_cpu_state saved = psp_cpu;
+    psp_thread *prev = g_current;
+    psp_thread *prev_me = g_tls_me;
+    int prev_intr = g_tls_intr_depth;
+    g_tls_intr_depth = 0;
+    g_current = g_tls_me = t;
+    psp_cpu.r[PSP_REG_A0] = psp_arg(1);
+    psp_cpu.r[PSP_REG_A1] = psp_arg(2);
+    psp_cpu.r[PSP_REG_SP] = (t->stack_base + t->stack_size - 64) & ~15u;
+    psp_cpu.r[PSP_REG_RA] = 0;
+    t->state = TH_RUNNING;
+    t->exited = 0;
+    g_started++;
+    if (setjmp(t->unwind) == 0) {
+        t->unwind_set = 1;
+        psp_dispatch(t->entry);
+        t->exit_status = psp_cpu.r[PSP_REG_V0];
+    }
+    t->unwind_set = 0;
+    t->exited = 1;
+    t->state = TH_DORMANT;
+    if (t->delete_after && t->stack_base) {
+        psp_sysmem_release(t->stack_base);
+        t->stack_base = 0;
+    }
+    g_current = prev;
+    g_tls_me = prev_me;
+    g_tls_intr_depth = prev_intr;
+    psp_cpu = saved;
+    psp_ret(SCE_KERNEL_ERROR_OK);
+    return;
+#endif
+#if PSPRECOMP_REAL_THREADS
 
     t->arglen = psp_arg(1);
     t->argp   = psp_arg(2);
@@ -767,23 +883,21 @@ static void hle_StartThread(void) {
      * for it. That window is the whole reason this flag is not just `state`. */
     t->cpu_pending = 1;
 
-    pthread_attr_t attr;
-    pthread_attr_init(&attr);
-    pthread_attr_setstacksize(&attr, HOST_STACK_BYTES);
-    int rc = pthread_create(&t->host, &attr, guest_thread_main, t);
-    pthread_attr_destroy(&attr);
+    t->exited = t->terminated = t->delete_after = 0;
+    int rc = host_thread_create(&t->host, HOST_STACK_BYTES, guest_thread_main, t);
     if (rc != 0) {
         t->state = TH_DORMANT;
         t->cpu_pending = 0;
         psp_ret(SCE_KERNEL_ERROR_NO_MEMORY);
         return;
     }
-    pthread_detach(t->host);
+    t->host_joinable = 1;
     t->host_live = 1;
 
     /* The whole point: the caller goes on running. The new thread waits for
      * the CPU, and gets it at the caller's next blocking call. */
     psp_ret(SCE_KERNEL_ERROR_OK);
+#endif
 }
 
 static void hle_ExitThread(void) {
@@ -821,8 +935,20 @@ static void hle_DeleteThread(void) {
     psp_thread *t = find_thread(psp_arg(0));
     if (!t) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_THID); return; }
     /* A running thread keeps its stack: it is still using it. */
-    if (t->exited && t->stack_base) { psp_sysmem_release(t->stack_base); t->stack_base = 0; }
-    if (!t->host_live) t->used = 0;
+    if (t->state == TH_DORMANT && t->stack_base) { psp_sysmem_release(t->stack_base); t->stack_base = 0; }
+#if PSPRECOMP_REAL_THREADS
+    if (!t->host_live) {
+        if (t->host_joinable) { host_thread_join(t->host); t->host_joinable = 0; }
+        if (t->wlock_ready) {
+            host_cond_destroy(&t->wcv);
+            host_mutex_destroy(&t->wlock);
+            t->wlock_ready = 0;
+        }
+        t->used = 0;
+    }
+#else
+    if (t->state != TH_RUNNING) t->used = 0;
+#endif
     psp_ret(SCE_KERNEL_ERROR_OK);
 }
 

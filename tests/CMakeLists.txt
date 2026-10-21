@@ -32,6 +32,11 @@ add_executable(test_hle test_hle.c)
 target_link_libraries(test_hle PRIVATE psprecomp allegrex_core)
 add_test(NAME hle COMMAND test_hle)
 
+add_executable(test_scheduler test_scheduler.c)
+target_link_libraries(test_scheduler PRIVATE psprecomp allegrex_core)
+add_test(NAME scheduler COMMAND test_scheduler)
+set_tests_properties(hle scheduler PROPERTIES TIMEOUT 60)
+
 add_executable(test_vfpu test_vfpu.c)
 target_link_libraries(test_vfpu PRIVATE psprecomp)
 add_test(NAME vfpu COMMAND test_vfpu)

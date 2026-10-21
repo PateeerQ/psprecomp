@@ -6,9 +6,21 @@ on:
     branches: [main]
 jobs:
   build-test:
-    runs-on: windows-latest
+    name: ${{ matrix.os }} / real-threads=${{ matrix.real_threads }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+        real_threads: ['OFF', 'ON']
     steps:
       - uses: actions/checkout@v4
-      - run: cmake -S . -B build
-      - run: cmake --build build --config Release
-      - run: ctest --test-dir build -C Release --output-on-failure
+      # Separate steps are intentional: a failed build must never run stale tests.
+      - name: Configure
+        run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DPSPRECOMP_REAL_THREADS=${{ matrix.real_threads }}
+      - name: Build (MSVC on Windows)
+        run: cmake --build build --config Release --parallel
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Repeat scheduler regression
+        run: ctest --test-dir build -C Release -R scheduler --repeat until-fail:20 --output-on-failure

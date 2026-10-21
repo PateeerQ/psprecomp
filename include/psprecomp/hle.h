@@ -167,11 +167,14 @@ uint64_t psp_audio_blocks(void);
 
 void psp_threadman_init(void);
 void psp_threadman_register(void);
+/* ThreadMan reset is a quiescent-host operation: all guest threads must have
+ * ended first. It reclaims host handles/locks, not guest stack allocations. */
 void psp_threadman_reset(void);
 
 /* ---- the scheduler -------------------------------------------------------
  *
- * One CPU, handed over explicitly: the boot thread (whoever calls
+ * Default execution is inline. PSPRECOMP_REAL_THREADS=ON opts into one CPU,
+ * handed over explicitly: the boot thread (whoever calls
  * psp_threadman_reset) runs the module entry, and a thread that blocks gives
  * the CPU away until it is woken. These are the points where that happens,
  * for use by the rest of the HLE layer. See src/hle/threadman.c. */

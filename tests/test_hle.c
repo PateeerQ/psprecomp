@@ -273,7 +273,11 @@ static void test_threads(void) {
     /* The contract that unblocks a game: StartThread returns with the body not
      * yet entered. A caller that runs the body inline never gets to post the
      * work that body is waiting for. */
+#if PSPRECOMP_REAL_THREADS
     CHECK(g_thread_ran == 0, "StartThread returns before the body is entered");
+#else
+    CHECK(g_thread_ran == 1, "default StartThread completes the body inline");
+#endif
 
     CHECK(psp_cpu.r[PSP_REG_S0] == 0xC0FFEE, "caller's registers restored");
 
@@ -295,8 +299,8 @@ static void test_threads(void) {
     CHECK(call(DELETE, thid, 0, 0, 0) == 0, "delete succeeds");
     CHECK(psp_sysmem_free() > before_delete, "deleting a thread frees its stack");
 
-    /* A thread that sleeps stays asleep until it is woken, and the thing that
-     * wakes it is another thread -- no amount of time passing does. */
+    /* Sleep yields for a tick in opt-in mode and returns immediately in inline
+     * mode. It is deliberately not faithful indefinite sleep. */
     const uint32_t SLEEPER = 0x08801080u;
     psp_register(SLEEPER, fake_sleeper_entry);
     uint32_t sid = call5(CREATE, 0, SLEEPER, 32, 0x4000, 0);
@@ -313,8 +317,13 @@ static void test_threads(void) {
     uint64_t handovers = psp_threadman_handovers();
     uint64_t started = psp_threadman_started();
     call(DELAY, 1000, 0, 0, 0);        /* the caller parks: the sleeper gets in */
+#if PSPRECOMP_REAL_THREADS
     CHECK(psp_threadman_handovers() > handovers,
           "the delay handed the CPU over to the thread that had not run yet");
+#else
+    CHECK(psp_threadman_handovers() == handovers && g_sleeper_stage == 2,
+          "default delay does not schedule; the sleeper already completed inline");
+#endif
     CHECK(psp_threadman_handover_expired() == 0,
           "and the handover did not fall back to its cap");
     /* The numbers are in the message on purpose: if this ever fails again, the
@@ -361,7 +370,11 @@ static void test_threads(void) {
     g_waiter_stage = 0;
     CHECK(call(START, wid, 0, 0, 0) == 0, "waiter started");
     call(DELAY, 1000, 0, 0, 0);
+#if PSPRECOMP_REAL_THREADS
     CHECK(g_waiter_stage == 1, "the waiter blocked on an empty semaphore");
+#else
+    CHECK(g_waiter_stage == 2, "default unsatisfied semaphore wait returns inline");
+#endif
 
     CHECK(call(SIGNAL, g_test_sema, 1, 0, 0) == 0, "signal succeeds");
     CHECK(call(WAITEND, wid, 0, 0, 0) == 0, "the waiter reaches its end");
@@ -599,6 +612,7 @@ static void test_unimplemented_logging(void) {
           "the zero-return ring's total counts past its own size");
 
     FILE *f = tmpfile();
+    CHECK(f != NULL, "temporary report file created");
     if (f) {
         psp_hle_dump_recent(f);
         rewind(f);
@@ -787,6 +801,7 @@ static void test_callbacks(void) {
     g_cb_calls = 0;
     g_boot_cbid = call(CREATE, 0, FN, 0xBB, 0);
     call(NOTIFY, g_boot_cbid, 0x22, 0, 0);
+    CHECK(call(CHECK, 0, 0, 0, 0) == 1, "owner consumes its first notification");
     const uint32_t OTHER = 0x08803100u;
     g_other_ran = 0xFFFFFFFFu;
     g_other_delta = 0xFFFFFFFFu;
