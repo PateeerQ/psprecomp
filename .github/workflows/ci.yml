@@ -23,4 +23,4 @@ jobs:
       - name: Test
         run: ctest --test-dir build -C Release --output-on-failure
       - name: Repeat scheduler regression
-        run: ctest --test-dir build -C Release -R scheduler --repeat until-fail:20 --output-on-failure
+        run: ctest --test-dir build -C Release -R "scheduler|thread_" --repeat until-fail:20 --output-on-failure
