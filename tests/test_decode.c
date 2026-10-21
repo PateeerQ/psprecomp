@@ -104,6 +104,11 @@ static void test_branch_targets(void) {
     CHECK(i.target == 0x08900100, "jal target: got 0x%08X", i.target);
     CHECK(i.is_call, "jal is a call");
     CHECK(!i.ends_block, "jal returns, so it does not end the block");
+    CHECK(!i.is_get_pc, "an ordinary jal is not the get-PC idiom");
+
+    /* jal .+8 targets its own return address: it loads the PC, calls nothing. */
+    i = dec(0x0E240002, 0x08900000, A_JAL, "jal 0x08900008");
+    CHECK(i.target == 0x08900008 && i.is_get_pc, "jal .+8 is the get-PC idiom");
 
     i = dec(0x0A240040, 0x08900000, A_J, "j 0x08900100");
     CHECK(i.ends_block, "j ends the block");

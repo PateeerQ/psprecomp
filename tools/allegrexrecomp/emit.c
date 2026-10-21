@@ -857,6 +857,16 @@ static void emit_function(ectx *c, const a_func *fn) {
             continue;
         }
 
+        if (in.is_get_pc) {                      /* jal .+8 */
+            /* Loads the PC into $ra and carries on. The "target" is the
+             * instruction after the delay slot, so there is no call to make. */
+            if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
+            fprintf(f, "    %s = 0x%08Xu;\n", RN[31], a + 8);
+            if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 1);
+            if (have_slot) a += 4;
+            continue;
+        }
+
         if (in.is_call) {                        /* jal / jalr */
             if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
             /* Set $ra.
