@@ -858,6 +858,10 @@ static void emit_function(ectx *c, const a_func *fn) {
         }
 
         if (in.is_call) {                        /* jal / jalr */
+            /* jalr reads its target before the delay slot runs, and the slot
+             * may write that register -- `jalr $t5` / `addiu $t5,$t5,8` calls
+             * the OLD $t5. Capture it first, as a branch captures `_c`. */
+            if (in.is_indirect) fprintf(f, "    { uint32_t _t = %s;\n", RN[in.rs]);
             if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
             /* Set $ra.
              *
@@ -872,9 +876,14 @@ static void emit_function(ectx *c, const a_func *fn) {
              * That is what the 17 dispatch misses to 0x00000000 were, and why
              * $ra held a stack address at the stall. The branch-and-link forms
              * a few lines above already did this correctly; jal and jalr --
-             * every ordinary call in the program -- did not. */
-            fprintf(f, "    %s = 0x%08Xu;\n", RN[31], a + 8);
-            if (in.is_indirect) fprintf(f, "    psp_dispatch(%s);\n", RN[in.rs]);
+             * every ordinary call in the program -- did not.
+             *
+             * jal always links $ra. jalr links the rd it encodes: almost
+             * always $ra, but `jalr $t0, $t1` is legal, and rd = $zero links
+             * nothing. */
+            const unsigned link = in.is_indirect ? in.rd : 31u;
+            if (link) fprintf(f, "    %s = 0x%08Xu;\n", RN[link], a + 8);
+            if (in.is_indirect) fprintf(f, "    psp_dispatch(_t); }\n");
             else                emit_static_call(c, in.target);
             if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 1);
             if (have_slot) a += 4;               /* see the branch case above */
@@ -896,8 +905,10 @@ static void emit_function(ectx *c, const a_func *fn) {
         }
 
         if (in.is_indirect) {                    /* jr $rN — computed jump */
+            /* The target is read before the delay slot, as for jalr above. */
+            fprintf(f, "    { uint32_t _t = %s;\n", RN[in.rs]);
             if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
-            fprintf(f, "    psp_dispatch(%s);\n    return;\n", RN[in.rs]);
+            fprintf(f, "    psp_dispatch(_t);\n    return; }\n");
             if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 0);
             a += 4;
             continue;

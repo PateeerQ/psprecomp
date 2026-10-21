@@ -686,6 +686,72 @@ static void check_terminal_transfer_stays_tail(void) {
     }
 }
 
+/* ---- an indirect transfer whose delay slot writes its target ---------------
+ *
+ * jr and jalr read their register before the delay slot runs, so a slot that
+ * writes it does not change where control goes. Hand-written ladders do this
+ * deliberately, stepping a pointer through a table of `b; move` pairs:
+ *
+ *   08804000  jr    $t4
+ *   08804004  addiu $t4,$t4,8     <- delay slot: the jump uses the old $t4
+ */
+static const uint32_t JR_SLOT_WRITES_TARGET[] = {
+    0x01800008u,   /* 08804000  jr    $t4        */
+    0x258C0008u,   /* 08804004  addiu $t4,$t4,8  */
+};
+
+/*  08804000  jalr  $t5           links $ra
+ *  08804004  addiu $t5,$t5,8     <- delay slot: the call uses the old $t5
+ *  08804008  jalr  $t0, $t1      links $t0, not $ra
+ *  0880400C  nop
+ *  08804010  jr    $ra
+ *  08804014  nop
+ */
+static const uint32_t JALR_CASES[] = {
+    0x01A0F809u,   /* 08804000  jalr  $t5        */
+    0x25AD0008u,   /* 08804004  addiu $t5,$t5,8  */
+    0x01204009u,   /* 08804008  jalr  $t0, $t1   */
+    0x00000000u,   /* 0880400C  nop              */
+    0x03E00008u,   /* 08804010  jr    $ra        */
+    0x00000000u,   /* 08804014  nop              */
+};
+
+/* `capture` must appear, and before `slot`, which must appear before `use`. */
+static void expect_order(const char *src, const char *capture, const char *slot,
+                         const char *use, const char *why) {
+    const char *c = strstr(src, capture);
+    const char *s = c ? strstr(c, slot) : NULL;
+    const char *u = s ? strstr(s, use) : NULL;
+    if (!u) {
+        printf("FAIL %s\n  expected, in order: %s / %s / %s\n", why, capture, slot, use);
+        failures++;
+    }
+}
+
+static void check_indirect_target_before_slot(void) {
+    uint32_t seed = BASE;
+    char *src = emit_synthetic("t_jr_slot", JR_SLOT_WRITES_TARGET, 2, &seed, 1, NULL);
+    if (src) {
+        expect_order(src, "uint32_t _t = r_t4;", "r_t4 = r_t4 + 8;", "psp_dispatch(_t);",
+                     "jr captures its target before the delay slot advances it");
+        expect_absent(src, "psp_dispatch(r_t4);",
+                      "jr does not read $t4 after the delay slot wrote it");
+        free(src);
+    }
+
+    src = emit_synthetic("t_jalr", JALR_CASES, 6, &seed, 1, NULL);
+    if (src) {
+        expect_order(src, "uint32_t _t = r_t5;", "r_t5 = r_t5 + 8;", "psp_dispatch(_t);",
+                     "jalr captures its target before the delay slot advances it");
+        expect_absent(src, "psp_dispatch(r_t5);",
+                      "jalr does not read $t5 after the delay slot wrote it");
+        expect_contains(src, "r_ra = 0x08804008u;", "jalr $t5 links $ra");
+        expect_contains(src, "r_t0 = 0x08804010u;", "jalr $t0, $t1 links $t0");
+        expect_absent(src, "r_ra = 0x08804010u;", "jalr $t0, $t1 leaves $ra alone");
+        free(src);
+    }
+}
+
 int main(void) {
     uint8_t code[sizeof CODE];
     for (size_t i = 0; i < sizeof CODE / sizeof CODE[0]; i++) {
@@ -881,6 +947,7 @@ int main(void) {
     check_slot_of_another_body();
     check_taken_path_runs_the_slot();
     check_terminal_transfer_stays_tail();
+    check_indirect_target_before_slot();
 
     if (failures) {
         printf("\n%d check(s) failed\n", failures);
