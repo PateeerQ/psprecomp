@@ -165,16 +165,32 @@ void psp_vscl(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
 static float sat0(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
 static float sat1(float v) { return v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v); }
 
-/* The conversions, as measured on a PSP-3000 (pspautotests
- * cpu/vfpu/convert_scaled). vf2iz truncates x * 2^scale toward zero and
- * saturates to int32; NaN of either sign gives 0x7FFFFFFF. A plain C cast
- * would be undefined for all three of those. */
-static uint32_t f2iz(float x, int scale) {
+/* Round half to even, without depending on the host's rounding mode. */
+static double round_even(double v) {
+    double r = floor(v);
+    const double frac = v - r;                   /* exact for |v| < 2^52 */
+    if (frac > 0.5 || (frac == 0.5 && fmod(r, 2.0) != 0.0)) r += 1.0;
+    return r;
+}
+
+/* The conversions, as measured on a PSP-3000 (pspautotests cpu/vfpu/convert
+ * and convert_scaled). vf2in/vf2iz/vf2iu/vf2id round x * 2^scale to nearest
+ * (ties to even), toward zero, up, and down, then saturate to int32; NaN of
+ * either sign gives 0x7FFFFFFF. A plain C cast would be undefined for all
+ * three of those edges. */
+static uint32_t f2i(float x, int scale, int op) {
     if (x != x) return 0x7FFFFFFFu;
     const double v = ldexp((double)x, scale);    /* exact: float * 2^31 fits a double */
-    if (v >= 2147483648.0)  return 0x7FFFFFFFu;
-    if (v <= -2147483648.0) return 0x80000000u;
-    return (uint32_t)(int32_t)v;                 /* in range, so the cast truncates */
+    double r;
+    switch (op) {
+    case PSP_VU_F2IN: r = round_even(v); break;
+    case PSP_VU_F2IU: r = ceil(v);       break;
+    case PSP_VU_F2ID: r = floor(v);      break;
+    default:          r = trunc(v);      break;   /* PSP_VU_F2IZ */
+    }
+    if (r >= 2147483648.0)  return 0x7FFFFFFFu;
+    if (r <= -2147483648.0) return 0x80000000u;
+    return (uint32_t)(int32_t)r;                 /* an in-range integer: exact */
 }
 
 /* vi2f: int * 2^-scale, rounded to float once. */
@@ -218,7 +234,7 @@ void psp_vunary(int op, uint32_t vd, uint32_t vs, int size) {
         case PSP_VU_SAT1: r = sat1(a);      break;
         /* Conversions move between the float and integer *interpretations* of
          * a vector register; the bits are reinterpreted, not just cast. */
-        case PSP_VU_F2IZ: r = psp_bits_to_f32(f2iz(a, 0));    break;
+        case PSP_VU_F2IZ: r = psp_bits_to_f32(f2i(a, 0, op)); break;
         case PSP_VU_I2F:  r = i2f(psp_f32_to_bits(a), 0);     break;
         default:          psp_vfpu_unimplemented(psp_cpu.pc, "vunary"); return;
         }
@@ -228,7 +244,7 @@ void psp_vunary(int op, uint32_t vd, uint32_t vs, int size) {
 }
 
 void psp_vcvt(int op, uint32_t vd, uint32_t vs, int size, int scale) {
-    if (!take_prefixes(psp_cpu.pc, op == PSP_VU_I2F ? "vi2f" : "vf2iz")) return;
+    if (!take_prefixes(psp_cpu.pc, op == PSP_VU_I2F ? "vi2f" : "vf2i")) return;
 
     int d[4], s[4];
     int n = psp_vfpu_regs(vd, size, d);
@@ -238,8 +254,9 @@ void psp_vcvt(int op, uint32_t vd, uint32_t vs, int size, int scale) {
     for (int i = 0; i < n; i++) {
         const float a = psp_cpu.v[s[i]];
         switch (op) {
-        case PSP_VU_F2IZ: out[i] = psp_bits_to_f32(f2iz(a, scale)); break;
-        case PSP_VU_I2F:  out[i] = i2f(psp_f32_to_bits(a), scale);  break;
+        case PSP_VU_F2IN: case PSP_VU_F2IZ: case PSP_VU_F2IU: case PSP_VU_F2ID:
+                          out[i] = psp_bits_to_f32(f2i(a, scale, op)); break;
+        case PSP_VU_I2F:  out[i] = i2f(psp_f32_to_bits(a), scale);    break;
         default:          psp_vfpu_unimplemented(psp_cpu.pc, "vcvt"); return;
         }
     }

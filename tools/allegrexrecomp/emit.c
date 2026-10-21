@@ -460,11 +460,15 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
 
     /* The conversions carry a 5-bit scale in bits 20..16 (the rt field):
      * vi2f.q C200, C100, 16 turns 16.16 fixed point into floats. */
-    case A_VF2IZ: case A_VI2F:
+    case A_VF2IN: case A_VF2IZ: case A_VF2IU: case A_VF2ID: case A_VI2F: {
+        const char *sel = in->op == A_VF2IN ? "PSP_VU_F2IN" :
+                          in->op == A_VF2IZ ? "PSP_VU_F2IZ" :
+                          in->op == A_VF2IU ? "PSP_VU_F2IU" :
+                          in->op == A_VF2ID ? "PSP_VU_F2ID" : "PSP_VU_I2F";
         fprintf(f, "%spsp_vcvt(%s, %u, %u, %u, %u);\n", ind,
-                in->op == A_VI2F ? "PSP_VU_I2F" : "PSP_VU_F2IZ",
-                in->vd, in->vs, in->vsize, in->rt);
+                sel, in->vd, in->vs, in->vsize, in->rt);
         return;
+    }
 
     /* Constant generators. These carry no source operand: what they produce is
      * encoded in the register number (vidt) or an index (vcst). */
