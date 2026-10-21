@@ -437,7 +437,7 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
     case A_VMOV: case A_VABS: case A_VNEG: case A_VZERO: case A_VONE:
     case A_VRCP: case A_VRSQ: case A_VSQRT: case A_VSIN: case A_VCOS:
     case A_VEXP2: case A_VLOG2: case A_VSAT0: case A_VSAT1:
-    case A_VNRCP: case A_VNSIN: case A_VASIN: case A_VF2IZ: case A_VI2F: {
+    case A_VNRCP: case A_VNSIN: case A_VASIN: {
         static const struct { a_op op; const char *sel; } U[] = {
             { A_VMOV, "PSP_VU_MOV" },   { A_VABS, "PSP_VU_ABS" },
             { A_VNEG, "PSP_VU_NEG" },   { A_VZERO,"PSP_VU_ZERO" },
@@ -447,8 +447,7 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
             { A_VEXP2,"PSP_VU_EXP2" },  { A_VLOG2,"PSP_VU_LOG2" },
             { A_VSAT0,"PSP_VU_SAT0" },  { A_VSAT1,"PSP_VU_SAT1" },
             { A_VNRCP,"PSP_VU_NRCP" },  { A_VNSIN,"PSP_VU_NSIN" },
-            { A_VASIN,"PSP_VU_ASIN" },  { A_VF2IZ,"PSP_VU_F2IZ" },
-            { A_VI2F, "PSP_VU_I2F" },
+            { A_VASIN,"PSP_VU_ASIN" },
         };
         for (size_t k = 0; k < sizeof U / sizeof U[0]; k++) {
             if (U[k].op != in->op) continue;
@@ -458,6 +457,14 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
         }
         break;
     }
+
+    /* The conversions carry a 5-bit scale in bits 20..16 (the rt field):
+     * vi2f.q C200, C100, 16 turns 16.16 fixed point into floats. */
+    case A_VF2IZ: case A_VI2F:
+        fprintf(f, "%spsp_vcvt(%s, %u, %u, %u, %u);\n", ind,
+                in->op == A_VI2F ? "PSP_VU_I2F" : "PSP_VU_F2IZ",
+                in->vd, in->vs, in->vsize, in->rt);
+        return;
 
     /* Constant generators. These carry no source operand: what they produce is
      * encoded in the register number (vidt) or an index (vcst). */

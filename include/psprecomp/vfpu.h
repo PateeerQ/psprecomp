@@ -79,6 +79,11 @@ enum {
 };
 void psp_vunary(int op, uint32_t vd, uint32_t vs, int size);
 
+/* vf2iz and vi2f with their 5-bit scale immediate (op is PSP_VU_F2IZ or
+ * PSP_VU_I2F). vf2iz converts x * 2^scale; vi2f produces int * 2^-scale.
+ * psp_vunary's cases for the two are this with scale 0. */
+void psp_vcvt(int op, uint32_t vd, uint32_t vs, int size, int scale);
+
 /* Matrix ops that need no multiply: identity, zero, one, and copy. `size` is
  * the matrix order (2, 3 or 4). */
 void psp_vmidt(uint32_t vd, int size);

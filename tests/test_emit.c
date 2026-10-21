@@ -877,6 +877,27 @@ int main(void) {
     }
     a_analysis_free(&an2);
 
+    /* vi2f / vf2iz carry a 5-bit scale in bits 20..16, which the emitter used
+     * to drop: vi2f.q C200, C100, 16 converted 16.16 fixed point as if it
+     * were a whole number, 65536 times too large. */
+    {
+        static const uint32_t CODE_CVT[] = {
+            0xD2908488u,   /* vi2f.q  C200, C100, 16 */
+            0xD2258488u,   /* vf2iz.q C200, C100, 5  */
+            0x03E00008u,   /* jr $ra                 */
+            0x00000000u,
+        };
+        uint32_t seed = BASE;
+        char *csrc = emit_synthetic("t_cvt", CODE_CVT, 4, &seed, 1, NULL);
+        if (csrc) {
+            expect_contains(csrc, "psp_vcvt(PSP_VU_I2F, 8, 4, 4, 16);",
+                            "vi2f passes its scale to the runtime");
+            expect_contains(csrc, "psp_vcvt(PSP_VU_F2IZ, 8, 4, 4, 5);",
+                            "vf2iz passes its scale to the runtime");
+            free(csrc);
+        }
+    }
+
     check_fall_out();
     check_slot_of_another_body();
     check_taken_path_runs_the_slot();
