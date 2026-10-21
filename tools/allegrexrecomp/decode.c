@@ -21,6 +21,7 @@
 #define VD_F(w)    ((w) & 0x7F)
 #define VS_F(w)    (((w) >> 8) & 0x7F)
 #define VT_F(w)    (((w) >> 16) & 0x7F)
+#define VT_MEM(w, hi) ((((w) >> 16) & 0x1F) | (((w) & (hi)) << 5))
 /* Vector width is split across two non-adjacent bits: 0..3 -> 1..4 lanes. */
 #define VSIZE(w)   (((((w) >> 7) & 1) | (((w) >> 14) & 2)) + 1)
 
@@ -521,12 +522,15 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
     case 0x38: op = A_SC;  break;
     case 0x39: op = A_SWC1; break;
 
-    /* VFPU load/store — these use the 7-bit vt field and a 16-byte-aligned
-     * offset for the quad forms. */
-    case 0x32: op = A_LV_S; break;
-    case 0x36: op = A_LV_Q; break;
-    case 0x3A: op = A_SV_S; break;
-    case 0x3E: op = A_SV_Q; break;
+    /* VFPU load/store. These cannot use the 7-bit vt field the arithmetic
+     * forms do: bits 25..21 are the base GPR, so only bits 20..16 belong to
+     * the register. Its high bits sit at the bottom of the word instead, where
+     * the word-aligned offset leaves room -- two bits for the single forms,
+     * one for the quad forms (whose bit 1 is a separate flag). */
+    case 0x32: op = A_LV_S; in.vt = (uint8_t)VT_MEM(word, 3); break;
+    case 0x36: op = A_LV_Q; in.vt = (uint8_t)VT_MEM(word, 1); break;
+    case 0x3A: op = A_SV_S; in.vt = (uint8_t)VT_MEM(word, 3); break;
+    case 0x3E: op = A_SV_Q; in.vt = (uint8_t)VT_MEM(word, 1); break;
 
     /* VFPU arithmetic families. Sub-opcode lives in bits 25..23. */
     case 0x18:

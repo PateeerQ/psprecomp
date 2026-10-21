@@ -215,6 +215,27 @@ static void test_vfpu(void) {
     dec(0xC8000000, 0x08900000, A_LV_S, "lv.s");
     dec(0xE8000000, 0x08900000, A_SV_S, "sv.s");
 
+    /* Their register is bits 20..16 plus high bits from the bottom of the
+     * word, NOT the 7-bit vt field: bits 22..21 there are the base GPR. Each
+     * word below has a base and a register that the 7-bit field gets wrong. */
+    in = dec(0xC8800005, 0x08900000, A_LV_S, "lv.s v32, 4($a0)");
+    CHECK(in.vt == 32 && in.rs == 4 && (in.imm & ~3) == 4,
+          "lv.s: vt %u (want 32), rs %u, offset %d", in.vt, in.rs, in.imm & ~3);
+
+    in = dec(0xE91F000B, 0x08900000, A_SV_S, "sv.s v127, 8($t0)");
+    CHECK(in.vt == 127 && in.rs == 8 && (in.imm & ~3) == 8,
+          "sv.s: both high bits: vt %u (want 127), rs %u, offset %d",
+          in.vt, in.rs, in.imm & ~3);
+
+    in = dec(0xD8A00000, 0x08900000, A_LV_Q, "lv.q v0, 0($a1)");
+    CHECK(in.vt == 0 && in.rs == 5,
+          "lv.q: base bits stay out of vt: vt %u (want 0), rs %u", in.vt, in.rs);
+
+    in = dec(0xFBA30012, 0x08900000, A_SV_Q, "sv.q v3, 16($sp), wb");
+    CHECK(in.vt == 3 && in.rs == 29 && (in.imm & ~3) == 16,
+          "sv.q: one high bit, bit 1 is a flag: vt %u (want 3), rs %u, offset %d",
+          in.vt, in.rs, in.imm & ~3);
+
     /* viim/vfim spell their single destination in the `vt` field, bits 16..22.
      * The case used to assign those fields to `out`, which a_decode's closing
      * `*out = in` then overwrote with the generic `vd = word & 0x7F`: the
