@@ -37,6 +37,13 @@ target_link_libraries(test_scheduler PRIVATE psprecomp allegrex_core)
 add_test(NAME scheduler COMMAND test_scheduler)
 set_tests_properties(hle scheduler PROPERTIES TIMEOUT 60)
 
+add_executable(test_thread_lifecycle test_thread_lifecycle.c)
+target_link_libraries(test_thread_lifecycle PRIVATE psprecomp allegrex_core)
+foreach(case delete pinned pending checkpoint0 checkpoint1 checkpoint2 checkpoint3 mask reset)
+    add_test(NAME thread_${case} COMMAND test_thread_lifecycle ${case})
+    set_tests_properties(thread_${case} PROPERTIES TIMEOUT 60)
+endforeach()
+
 add_executable(test_vfpu test_vfpu.c)
 target_link_libraries(test_vfpu PRIVATE psprecomp)
 add_test(NAME vfpu COMMAND test_vfpu)

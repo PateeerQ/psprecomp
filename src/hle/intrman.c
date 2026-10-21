@@ -133,6 +133,7 @@ void psp_intr_tick(void) {
      * serviced is simply serviced later, which is what the flag being set
      * achieves anyway. */
     if (g_delivering) return;
+    if (psp_threadman_intr_disabled()) return;
     g_delivering = 1;
 
     for (int i = 0; i < MAX_SUBINTR; i++) {

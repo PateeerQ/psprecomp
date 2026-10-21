@@ -153,10 +153,14 @@ typedef struct {
     int terminated;               /* sceKernelTerminateThread asked for it */
     int delete_after;             /* sceKernelExitDeleteThread: free on the way out */
     int exited;
+    int end_waiters;               /* pins a record while WaitThreadEnd parks */
+    struct end_ctx *end_waits;     /* nested waits, unwound with the guest */
 
     jmp_buf  unwind;       /* where sceKernelExitThread returns to */
     int      unwind_set;
 } psp_thread;
+
+struct end_ctx { psp_thread *t; struct end_ctx *prev; };
 
 typedef struct {
     uint32_t uid;
@@ -481,7 +485,10 @@ static void wake_waiters(int kind) { (void)kind; }
 /* Every park used by a wait goes through here, so that "time passes, another
  * thread runs, an interrupt may be delivered" is one thing rather than five
  * copies of it. */
+static void check_terminated(void);
+
 static void park_for(int kind, uint64_t timeout_us) {
+    check_terminated();
     psp_thread *t = g_tls_me;
 
 #if PSPRECOMP_REAL_THREADS
@@ -498,6 +505,7 @@ static void park_for(int kind, uint64_t timeout_us) {
     (void)t; (void)kind;
 #endif
     park_us(timeout_us);
+    check_terminated();
 }
 
 /* ================================ public ================================= */
@@ -663,6 +671,10 @@ static psp_thread *find_thread(uint32_t id) {
 
 static void thread_unwind(psp_thread *t, uint32_t status) {
     if (!t || !t->unwind_set) return;      /* not a started thread: nothing to unwind */
+    while (t->end_waits) {
+        t->end_waits->t->end_waiters--;
+        t->end_waits = t->end_waits->prev;
+    }
     t->exit_status = status;
     longjmp(t->unwind, 1);
 }
@@ -711,6 +723,7 @@ static uint32_t wait_loop(int (*ready)(void *), void *ctx, uint64_t timeout_us,
     uint64_t ticks = 0;
 
     for (;;) {
+        check_terminated();
         deliver_tick();
         if (ready(ctx)) return SCE_KERNEL_ERROR_OK;
 #if !PSPRECOMP_REAL_THREADS
@@ -762,6 +775,7 @@ static void *guest_thread_main(void *arg) {
 
     if (setjmp(t->unwind) == 0) {
         t->unwind_set = 1;
+        check_terminated(); /* A request can arrive before our first CPU turn. */
         psp_dispatch(t->entry);
         t->exit_status = psp_cpu.r[PSP_REG_V0];
     }
@@ -794,8 +808,32 @@ static void *guest_thread_main(void *arg) {
 
 #endif
 
+/* The departing host must never publish a reusable record: it still uses it
+ * while releasing the baton. Reap only from another CPU owner, after joining
+ * the host, and keep records pinned by a parked WaitThreadEnd caller. */
+static void reap_deleted_threads(void) {
+    for (int i = 0; i < MAX_THREADS - 1; i++) {
+        psp_thread *t = &g_thread[i];
+        if (!t->used || !t->delete_after || !t->exited || t->end_waiters) continue;
+#if PSPRECOMP_REAL_THREADS
+        if (t->host_live) continue;
+        if (t->host_joinable) {
+            host_thread_join(t->host);
+            t->host_joinable = 0;
+        }
+        if (t->wlock_ready) {
+            host_cond_destroy(&t->wcv);
+            host_mutex_destroy(&t->wlock);
+            t->wlock_ready = 0;
+        }
+#endif
+        t->used = 0;
+    }
+}
+
 static void hle_CreateThread(void) {
     /* (name, entry, priority, stackSize, attr, option) */
+    reap_deleted_threads();
     psp_thread *t = NULL;
     for (int i = 0; i < MAX_THREADS - 1; i++)
         if (!g_thread[i].used) { t = &g_thread[i]; break; }
@@ -852,7 +890,7 @@ static void hle_StartThread(void) {
     psp_cpu.r[PSP_REG_SP] = (t->stack_base + t->stack_size - 64) & ~15u;
     psp_cpu.r[PSP_REG_RA] = 0;
     t->state = TH_RUNNING;
-    t->exited = 0;
+    t->exited = t->terminated = t->delete_after = 0;
     g_started++;
     if (setjmp(t->unwind) == 0) {
         t->unwind_set = 1;
@@ -903,8 +941,7 @@ static void hle_StartThread(void) {
 static void hle_ExitThread(void) {
     uint32_t status = psp_arg(0);
     if (g_current && g_current->unwind_set) {
-        g_current->exit_status = status;
-        longjmp(g_current->unwind, 1);
+        thread_unwind(g_current, status);
     }
     /* Nothing to unwind to: the module called ExitThread from its entry rather
      * than from a started thread. Nothing further can run. */
@@ -1007,21 +1044,24 @@ static void hle_CancelWakeupThread(void) {
     psp_ret((uint32_t)had);
 }
 
-struct end_ctx { psp_thread *t; };
 static int end_reached(void *p) {
     psp_thread *t = ((struct end_ctx *)p)->t;
-    return t->exited || t->terminated;
+    return t->exited;
 }
 
 static void wait_thread_end(void) {
     psp_thread *t = find_thread(psp_arg(0));
     if (!t) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_THID); return; }
     uint32_t out = psp_arg(1), timeout = psp_arg(2);
-    struct end_ctx c = { t };
+    struct end_ctx c = { t, g_tls_me ? g_tls_me->end_waits : NULL };
 
+    t->end_waiters++;
+    if (g_tls_me) g_tls_me->end_waits = &c;
     uint32_t rc = wait_loop(end_reached, &c, timeout, W_THREAD_END,
                             "sceKernelWaitThreadEnd", t->name);
     if (out) psp_write32(out, t->exit_status);
+    t->end_waiters--;
+    if (g_tls_me) g_tls_me->end_waits = c.prev;
     psp_ret(rc);
 }
 
@@ -1510,6 +1550,7 @@ static int deliver_callbacks(void) {
  * "time passes, another thread runs, deferred work may run" is one thing, and
  * the five wait points must not drift apart on it. */
 static void deliver_tick(void) {
+    check_terminated();
     psp_intr_tick();
     deliver_callbacks();
 }
