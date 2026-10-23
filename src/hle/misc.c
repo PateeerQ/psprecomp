@@ -10,6 +10,7 @@
 #include "psprecomp/hle.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -157,6 +158,9 @@ static uint64_t g_audio_blocks;
 uint64_t psp_audio_blocks(void) { return g_audio_blocks; }
 
 static void hle_ChReserve(void) {
+    if (getenv("PSPRECOMP_TRACE_SAS"))
+        fprintf(stderr, "audio: ChReserve ch %d samples %u format %u\n",
+                (int)psp_arg(0), psp_arg(1), psp_arg(2));
     /* (channel, samplecount, format) -- channel -1 means "any". */
     int32_t ch = (int32_t)psp_arg(0);
     if (ch < 0) {
@@ -187,14 +191,57 @@ static void hle_Output(void) {
 /* The blocking forms hold the caller while the hardware drains a buffer, and
  * that is what paces a game's audio thread. Returning at once lets a mixer
  * loop spin forever and starve every other guest thread.
- * ponytail: one buffer's play time per call (44.1 kHz), not a model of the
- * hardware queue, which lets the first call return immediately. */
+ *
+ * Under real threads the hardware queue is modelled on the host clock: a
+ * buffer is due one play time after the last, and the call only waits while
+ * the queue is more than a buffer ahead. Waiting a fixed play time per call
+ * did not work there. The scheduler is cooperative, each tick of the wait
+ * handed the CPU to the game's main thread for a whole frame, and WTF's audio
+ * ran at about 10 buffers a second instead of 172; its title waits for a
+ * jingle that, by its own sample count, never finished. A thread that falls
+ * behind now catches up without waiting, as it would against a real queue.
+ * Inline mode keeps the virtual-time wait. */
+#if PSPRECOMP_REAL_THREADS
+static uint64_t host_now_us(void) {
+    struct timespec ts;
+    timespec_get(&ts, TIME_UTC);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+static uint64_t g_audio_due_us[AUDIO_CHANNELS];
+#endif
+
 static void hle_OutputBlocking(void) {
     uint32_t ch = psp_arg(0);
     uint32_t samples = ch < AUDIO_CHANNELS ? g_audio[ch].samples : 0;
+    static int traced;
+    if (getenv("PSPRECOMP_TRACE_SAS") && traced++ < 4)
+        fprintf(stderr, "audio: OutputBlocking ch %u samples %u buf 0x%08X\n", ch, samples, psp_arg(2));
     hle_Output();
-    psp_threadman_delay((uint64_t)samples * 1000000u / 44100u);
+    const uint64_t play_us = (uint64_t)samples * 1000000u / 44100u;
+#if PSPRECOMP_REAL_THREADS
+    if (ch < AUDIO_CHANNELS) {
+        uint64_t now = host_now_us();
+        if (g_audio_due_us[ch] < now) g_audio_due_us[ch] = now;   /* underrun */
+        g_audio_due_us[ch] += play_us;
+        while (host_now_us() + play_us < g_audio_due_us[ch]) psp_threadman_yield();
+    }
+#else
+    psp_threadman_delay(play_us);
+#endif
     psp_ret(samples);
+}
+
+/* The sample count a channel outputs per call. It is set at reserve time and
+ * changed here; ignoring the change left WTF's channel at its reserved length,
+ * so each blocking output waited for 4,096 samples while the game mixed 256,
+ * and its audio ran 16 times slow. */
+static void hle_SetChannelDataLen(void) {
+    uint32_t ch = psp_arg(0);
+    if (ch >= AUDIO_CHANNELS) { psp_ret(0x80260003); return; }   /* invalid channel */
+    g_audio[ch].samples = psp_arg(1);
+    if (getenv("PSPRECOMP_TRACE_SAS"))
+        fprintf(stderr, "audio: SetChannelDataLen ch %u samples %u\n", ch, psp_arg(1));
+    psp_ret(SCE_KERNEL_ERROR_OK);
 }
 
 /* Zero remaining means "ready for more", so a game's audio loop keeps going. */
@@ -208,6 +255,9 @@ void psp_misc_reset(void) {
     g_analog_x = g_analog_y = 128;
     g_ctrl_frame = 0;
     memset(g_audio, 0, sizeof g_audio);
+#if PSPRECOMP_REAL_THREADS
+    memset(g_audio_due_us, 0, sizeof g_audio_due_us);
+#endif
     g_audio_blocks = 0;
 }
 
@@ -257,7 +307,7 @@ void psp_misc_register(void) {
     psp_hle_register(0x13F592BC, "sceAudio", "sceAudioOutputPannedBlocking", hle_OutputBlocking);
     psp_hle_register(0xE2D56B2D, "sceAudio", "sceAudioOutputPanned",         hle_Output);
     psp_hle_register(0xB011922F, "sceAudio", "sceAudioGetChannelRestLength", hle_GetChannelRestLength);
-    psp_hle_register(0xCB2E439E, "sceAudio", "sceAudioSetChannelDataLen",    hle_ok);
+    psp_hle_register(0xCB2E439E, "sceAudio", "sceAudioSetChannelDataLen",    hle_SetChannelDataLen);
     psp_hle_register(0x95FD0C2D, "sceAudio", "sceAudioChangeChannelConfig",  hle_ok);
     psp_hle_register(0xB7E1D8E7, "sceAudio", "sceAudioChangeChannelVolume",  hle_ok);
 }

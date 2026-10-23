@@ -567,7 +567,13 @@ void psp_threadman_reset(void) {
     boot_record();
 }
 
-void psp_threadman_init(void) { psp_threadman_reset(); trace_sched_enable(); }
+void psp_threadman_init(void) {
+#if PSPRECOMP_REAL_THREADS
+    host_timer_init();
+#endif
+    psp_threadman_reset();
+    trace_sched_enable();
+}
 
 /* Delivers the deferred work every wait point owes the guest: an interrupt, and
  * the callbacks this thread has pending. Defined with the callbacks, below. */
@@ -689,14 +695,30 @@ static void check_terminated(void) {
 
 /* ---- the shape of every guest wait --------------------------------------- */
 
-/* How long an *unbounded* guest wait is allowed to keep trying. The guest's
- * own timeout is honoured exactly; this cap exists for the waits that have
- * none, because on hardware they are satisfied by another thread and here they
- * may be satisfied by one that never gets there. A run that cannot progress
- * has to end in a report naming what it was waiting for, not in a stopped
- * terminal -- and 500 ticks is 500 ms of guest time, which is far longer than
- * any frame-to-frame handshake this model has to carry. */
+/* How long an *unbounded* guest wait waits before it is reported. The guest's
+ * own timeout is honoured exactly. A wait with none never times out on
+ * hardware, and code relies on that: WTF's sound thread waits forever on its
+ * request queue and does not check the result, so a timeout here made it
+ * process an empty request and open a file named NULL.
+ *
+ * So, under real threads, an unbounded wait keeps waiting while any other guest
+ * thread is alive to satisfy it, and says so once after this many ticks. Only a
+ * waiter with no other live thread -- nothing could ever wake it -- gives up
+ * with a timeout, so that a run that cannot progress ends in a report naming
+ * what it waited for. A deadlock between live threads is the host's watchdog's
+ * to report. */
 #define WAIT_TICKS_MAX 500
+
+#if PSPRECOMP_REAL_THREADS
+static int others_alive(void) {
+    for (int i = 0; i < MAX_THREADS; i++)
+        if (&g_thread[i] != g_tls_me && g_thread[i].host_live && !g_thread[i].exited)
+            return 1;
+    return 0;
+}
+#endif
+
+static uint64_t g_wait_long;          /* long waits reported, real threads */
 
 static void warn_wait(const char *what, const char *name) {
 #if !PSPRECOMP_REAL_THREADS
@@ -734,8 +756,19 @@ static uint32_t wait_loop(int (*ready)(void *), void *ctx, uint64_t timeout_us,
         check_terminated();
         if (deadline && g_vtime_us >= deadline) return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
         if (!deadline && ++ticks > WAIT_TICKS_MAX) {
-            warn_wait(what, name);
-            return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+#if PSPRECOMP_REAL_THREADS
+            if (others_alive()) {
+                if (ticks == WAIT_TICKS_MAX + 1 && g_wait_long++ < 8)
+                    fprintf(stderr, "psprecomp: %s%s%s has waited %llu ticks; still waiting,"
+                            " other threads are alive\n", what,
+                            (name && name[0]) ? " '" : "", (name && name[0]) ? name : "",
+                            (unsigned long long)WAIT_TICKS_MAX);
+            } else
+#endif
+            {
+                warn_wait(what, name);
+                return SCE_KERNEL_ERROR_WAIT_TIMEOUT;
+            }
         }
         uint64_t step = TICK_US;
         if (deadline && deadline - g_vtime_us < step) step = deadline - g_vtime_us;
@@ -776,7 +809,7 @@ static void *guest_thread_main(void *arg) {
     if (setjmp(t->unwind) == 0) {
         t->unwind_set = 1;
         check_terminated(); /* A request can arrive before our first CPU turn. */
-        psp_dispatch(t->entry);
+        psp_call_from_host(t->entry);
         t->exit_status = psp_cpu.r[PSP_REG_V0];
     }
     /* Landing here with a nonzero setjmp result means the thread was unwound --
@@ -894,7 +927,7 @@ static void hle_StartThread(void) {
     g_started++;
     if (setjmp(t->unwind) == 0) {
         t->unwind_set = 1;
-        psp_dispatch(t->entry);
+        psp_call_from_host(t->entry);
         t->exit_status = psp_cpu.r[PSP_REG_V0];
     }
     t->unwind_set = 0;
@@ -1531,7 +1564,7 @@ static int deliver_callbacks(void) {
         psp_cpu.r[PSP_REG_A0] = c->arg;      /* what the guest passed at create time */
         psp_cpu.r[PSP_REG_A1] = arg;         /* and what the notification carried */
         psp_cpu.r[PSP_REG_RA] = 0;
-        psp_dispatch(c->func);
+        psp_call_from_host(c->func);
         c->delivery_status = (int32_t)psp_cpu.r[PSP_REG_V0];
         psp_cpu = saved;
 

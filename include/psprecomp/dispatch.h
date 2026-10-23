@@ -37,6 +37,23 @@ psp_fn_t psp_lookup(uint32_t addr);
  * instead of an access violation. */
 void psp_dispatch(uint32_t addr);
 
+/* Call guest code from the host (a thread entry, a callback, an interrupt
+ * handler, a constructor). Pushes a host frame: the guest's `jr $ra` at its end
+ * is a return whatever $ra holds, and no unwind crosses it. */
+void psp_call_from_host(uint32_t addr);
+
+/* What a `jr $ra` to `ra` is. On the hardware it is just a jump; recompiled,
+ * calls are C calls, so it is one of three things:
+ *  - a return, when `ra` is the current call's return site (or the call was
+ *    made by the host): returns 0;
+ *  - a return past nested calls, when `ra` is an outer call's return site --
+ *    a helper reached by a branch-and-link that leaves by branching to its
+ *    caller's epilogue: sets psp_cpu.unwind and returns 0, and each call site
+ *    returns until the one that owns `ra` resumes;
+ *  - a jump inside the current call, when `ra` matches no call -- $ra used as a
+ *    continuation: returns 1, and the caller dispatches to `ra`. */
+int psp_ra_is_jump(uint32_t ra);
+
 /* Called when psp_dispatch hits an unregistered address. The default prints
  * the address and aborts; a host can override it to log and continue, which is
  * useful while discovery is still incomplete. */

@@ -82,7 +82,7 @@ int psp_ctors_run(uint32_t table) {
          * to zero so a stale value cannot be mistaken for a return address if
          * one of them stores it. */
         psp_cpu.r[PSP_REG_RA] = 0;
-        psp_dispatch(fn);
+        psp_call_from_host(fn);
         n++;
         if (n > 4096) break;
     }

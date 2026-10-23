@@ -66,6 +66,9 @@ option(PSPRECOMP_REAL_THREADS "Enable experimental cooperative host-thread sched
 target_compile_definitions(psprecomp PUBLIC
     PSPRECOMP_REAL_THREADS=$<BOOL:${PSPRECOMP_REAL_THREADS}>
 )
+if(PSPRECOMP_REAL_THREADS AND WIN32)
+    target_link_libraries(psprecomp PUBLIC winmm)   # timeBeginPeriod
+endif()
 if(PSPRECOMP_REAL_THREADS AND NOT WIN32)
     find_package(Threads REQUIRED)
     target_link_libraries(psprecomp PUBLIC Threads::Threads)

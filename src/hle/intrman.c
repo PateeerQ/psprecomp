@@ -160,7 +160,7 @@ void psp_intr_tick(void) {
         psp_cpu.r[PSP_REG_A0] = (uint32_t)s->subintr;   /* handler(subintr, arg) */
         psp_cpu.r[PSP_REG_A1] = s->arg;
         psp_cpu.r[PSP_REG_RA] = 0;
-        psp_dispatch(s->handler);
+        psp_call_from_host(s->handler);
         psp_cpu = saved;
 
         g_deliveries++;

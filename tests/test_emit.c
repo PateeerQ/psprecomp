@@ -786,7 +786,83 @@ static void check_get_pc_is_not_a_call(void) {
         /* Depending on discovery order the old output called the phantom
          * directly or went through dispatch; both run the tail twice. */
         expect_absent(src, "psp_func_08804008();", "jal .+8 makes no direct call");
-        expect_absent(src, "psp_dispatch(", "jal .+8 does not dispatch either");
+        /* Every `jr $ra` carries a guarded psp_dispatch(_t) for $ra used as
+         * a continuation, so look for a dispatch to a fixed address. */
+        expect_absent(src, "psp_dispatch(0x", "jal .+8 does not dispatch either");
+        free(src);
+    }
+}
+
+/* ---- `jr $ra` as a continuation, not a return ------------------------------
+ *
+ * Call a helper, then later *branch* to a stub ending in `jr $ra`: $ra still
+ * holds the call's return site, so the stub jumps back inside the same
+ * function. Emitted as `return`, it leaves early with the frame on the stack
+ * (WTF's decompressor at 0x000824D0 leaked 896 bytes this way).
+ *
+ *   08804000  addiu $sp,$sp,-16
+ *   08804004  sw    $ra,0($sp)
+ *   08804008  jal   08804038          $ra = 08804010
+ *   0880400C  nop
+ *   08804010  addiu $v0,$v0,1          <- return site, reached again by the stub
+ *   08804014  slti  $v1,$v0,3
+ *   08804018  bne   $v1,$zero,0880402C
+ *   0880401C  nop
+ *   08804020  lw    $ra,0($sp)
+ *   08804024  jr    $ra                the real return
+ *   08804028  addiu $sp,$sp,16
+ *   0880402C  jr    $ra                continuation: back to 08804010
+ *   08804030  nop
+ *   08804034  nop
+ *   08804038  jr    $ra                the helper
+ *   0880403C  nop
+ */
+static const uint32_t JR_RA_CONTINUATION[] = {
+    0x27BDFFF0u, 0xAFBF0000u, 0x0E20100Eu, 0x00000000u,
+    0x24420001u, 0x28430003u, 0x14600004u, 0x00000000u,
+    0x8FBF0000u, 0x03E00008u, 0x27BD0010u, 0x03E00008u,
+    0x00000000u, 0x00000000u, 0x03E00008u, 0x00000000u,
+};
+
+static void check_jr_ra_continuation(void) {
+    uint32_t seed = BASE;
+    char *src = emit_synthetic("t_jr_ra_cont", JR_RA_CONTINUATION, 16, &seed, 1, NULL);
+    if (src) {
+        expect_contains(src, "case 0x08804010u:", "the call's return site is a label");
+        expect_contains(src, "PSP_CALL_BEGIN(0x08804010u);",
+                        "the call records the return site it expects");
+        expect_contains(src, "if (psp_ra_is_jump(_t)) { psp_dispatch(_t); return; }",
+                        "a jr $ra elsewhere is a jump, not a return");
+        free(src);
+    }
+}
+
+/* ---- a branch-and-link is a conditional call (#16) --------------------------
+ *
+ *   08804000  bgezal $zero, 08804014   (bal: call 08804014)
+ *   08804004  nop
+ *   08804008  addiu  $v0, $zero, 1     <- runs after the call returns
+ *   0880400C  jr     $ra
+ *   08804010  nop
+ *   08804014  jr     $ra               the callee
+ *   08804018  nop
+ *
+ * The taken path was emitted as a tail transfer, so the callee's return ended
+ * the caller too and the addiu never ran. */
+static const uint32_t BAL_CALL[] = {
+    0x04110004u, 0x00000000u, 0x24020001u, 0x03E00008u,
+    0x00000000u, 0x03E00008u, 0x00000000u,
+};
+
+static void check_link_branch_is_a_call(void) {
+    uint32_t seed = BASE;
+    char *src = emit_synthetic("t_bal", BAL_CALL, 7, &seed, 1, NULL);
+    if (src) {
+        expect_contains(src, "r_ra = 0x08804008u;", "bal links $ra");
+        expect_contains(src, "PSP_CALL_BEGIN(0x08804008u);", "bal calls, expecting to return after its slot");
+        expect_absent(src, "08804014(); return;", "the taken path is not a tail transfer");
+        expect_order(src, "PSP_CALL_END(0x08804008u);", "      } }", "r_v0 = r_zero + 1;",
+                     "the code after the call follows it");
         free(src);
     }
 }
@@ -1016,6 +1092,8 @@ int main(void) {
     check_terminal_transfer_stays_tail();
     check_indirect_target_before_slot();
     check_get_pc_is_not_a_call();
+    check_jr_ra_continuation();
+    check_link_branch_is_a_call();
 
     if (failures) {
         printf("\n%d check(s) failed\n", failures);

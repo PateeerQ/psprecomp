@@ -42,7 +42,10 @@ static uint32_t call(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2,
 /* Stack arguments live at $sp+16 onward. */
 static uint32_t call5(uint32_t nid, uint32_t a0, uint32_t a1, uint32_t a2,
                       uint32_t a3, uint32_t a4) {
-    psp_write32(psp_cpu.r[PSP_REG_SP] + 16, a4);
+    /* The PSP passes arguments 5-8 in $t0-$t3, not on the stack as o32 does;
+     * psp_arg(4) reads $t0. Writing the stack here meant every fifth argument
+     * arrived as 0. */
+    psp_cpu.r[PSP_REG_T0] = a4;
     return call(nid, a0, a1, a2, a3);
 }
 
@@ -580,6 +583,31 @@ static void test_sas_adpcm(void) {
      * reports ended is a common way for audio to stall after the first sound. */
     uint32_t ended = call(psp_nid("__sceSasGetEndFlag"), 0, 0, 0, 0);
     CHECK((ended & ~1u) != 0, "unused voices report ended, got 0x%08X", ended);
+
+    /* The block flags decide whether a voice loops: loop start (4), then an
+     * end (1), which repeats only with the repeat bit (2) and loop mode on.
+     * Three blocks are 84 samples; at a grain of 64, a voice that ends is gone
+     * after two frames, and one that loops is still playing after twenty. */
+    static const struct { uint8_t end_flags; uint32_t loop; int want_ended; const char *what; } C[] = {
+        { 0x01, 1, 1, "an end without repeat stops, even in loop mode" },
+        { 0x03, 1, 0, "an end with repeat loops in loop mode" },
+        { 0x03, 0, 1, "an end with repeat stops when loop mode is off" },
+    };
+    for (int k = 0; k < 3; k++) {
+        const uint8_t flags[3] = { 0x04, 0x00, C[k].end_flags };
+        for (uint32_t b = 0; b < 3; b++) {
+            psp_write8(VAG + b * 16, 0x08);
+            psp_write8(VAG + b * 16 + 1, flags[b]);
+            for (uint32_t i = 0; i < 14; i++) psp_write8(VAG + b * 16 + 2 + i, 0x7Fu);
+        }
+        psp_write8(VAG + 48, 0x00);
+        psp_write8(VAG + 49, 0x07);        /* terminator block */
+        call5(psp_nid("__sceSasSetVoice"), 0, 1, VAG, 64, C[k].loop);
+        call(psp_nid("__sceSasSetKeyOn"), 0, 1, 0, 0);
+        for (int f = 0; f < 20; f++) call(psp_nid("__sceSasCore"), 0, OUT, 0, 0);
+        uint32_t e = call(psp_nid("__sceSasGetEndFlag"), 0, 0, 0, 0);
+        CHECK(((e >> 1) & 1u) == (uint32_t)C[k].want_ended, "%s (end flags 0x%08X)", C[k].what, e);
+    }
 }
 
 static void test_display(void) {
