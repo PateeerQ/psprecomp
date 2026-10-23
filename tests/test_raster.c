@@ -233,6 +233,36 @@ static void test_backend_selection(void) {
     CHECK(psp_render_select("software") == 0, "software reselectable");
 }
 
+/* FBP is an offset into VRAM: games send the pointer relative to eDRAM
+ * (sceGuDrawBuffer's 0x88000 is the second buffer), so the high byte is 0.
+ * Taken as an absolute address it lands in main RAM. For a module loaded
+ * at vaddr 0 that is the game's own code and data. WTF overwrote a jump table
+ * this way and every clear went to RAM instead of the screen. */
+static void test_framebuffer_is_vram_relative(void) {
+    const uint32_t rel = 0x00088000u, ram_probe = rel + (100u * 480u + 150u) * 4u;
+    const int ram_ok = psp_mem_ptr(ram_probe, 4) != NULL;
+    if (ram_ok) psp_write32(ram_probe, 0x12345678u);
+    psp_ge_reset();
+    g_pc = 0;
+    cmd(0x10, (VERTS >> 8) & 0xFF0000);
+    cmd(0x9C, rel);                       /* FBP, relative */
+    cmd(0x9D, 480);                       /* FBW, high byte 0 */
+    cmd(0x12, VTYPE_2D);
+    cmd(0x01, VERTS & 0xFFFFFF);
+    vertex(0, 100, 50, 0xFF00FF00u);
+    vertex(1, 200, 150, 0xFF00FF00u);
+    cmd(0x04, (6u << 16) | 2);
+    end_list();
+
+    uint32_t got = psp_read32(PSP_VRAM_BASE + ram_probe);
+    CHECK(got == 0xFF00FF00u, "relative FBP draws into VRAM at 0x%08X: 0x%08X",
+          PSP_VRAM_BASE + ram_probe, got);
+    if (ram_ok)
+        CHECK(psp_read32(ram_probe) == 0x12345678u,
+              "relative FBP must not write main RAM at 0x%08X: 0x%08X",
+              ram_probe, psp_read32(ram_probe));
+}
+
 int main(void) {
     if (psp_mem_init() != 0) { printf("memory init failed\n"); return 1; }
     psp_cpu_reset();
@@ -245,6 +275,7 @@ int main(void) {
     test_clipping();
     test_transformed_is_skipped();
     test_triangle_strip();
+    test_framebuffer_is_vram_relative();
     test_backend_selection();
 
     psp_mem_free();
