@@ -269,6 +269,30 @@ static void test_matrix_ops(void) {
         for (int r = 0; r < 4; r++) CHECK_F(out[c][r], m[c][r] * 2.5f, "vmscl element");
 }
 
+/* vmmul's orientation, from hand-worked numbers. With A = [1 2; 3 4] and
+ * B = [5 6; 7 8] (rows), A*B = [19 22; 43 50]. The code idiom for that is
+ * vmmul.q Md, E_A, M_B; the plain form gives A^T * B = [26 30; 38 44]. */
+static void test_vmmul_orientation(void) {
+    psp_vfpu_reset();
+    float a[4][4] = {{0}}, b[4][4] = {{0}}, out[4][4];
+    a[0][0] = 1; a[1][0] = 2; a[0][1] = 3; a[1][1] = 4;    /* [col][row] */
+    b[0][0] = 5; b[1][0] = 6; b[0][1] = 7; b[1][1] = 8;
+    set_matrix(0x08, 2, a);                 /* matrix 2 */
+    set_matrix(0x10, 2, b);                 /* matrix 4 */
+
+    psp_vmmul(0x00, 0x28, 0x10, 2);         /* M000 = E200 x M400 */
+    get_matrix(0x00, 2, out);
+    CHECK_F(out[0][0], 19.0f, "E-form vmmul is A*B: row 0 col 0");
+    CHECK_F(out[1][0], 22.0f, "E-form vmmul is A*B: row 0 col 1");
+    CHECK_F(out[0][1], 43.0f, "E-form vmmul is A*B: row 1 col 0");
+    CHECK_F(out[1][1], 50.0f, "E-form vmmul is A*B: row 1 col 1");
+
+    psp_vmmul(0x00, 0x08, 0x10, 2);         /* plain form: A^T * B */
+    get_matrix(0x00, 2, out);
+    CHECK_F(out[0][0], 26.0f, "plain vmmul is A^T*B: row 0 col 0");
+    CHECK_F(out[1][1], 44.0f, "plain vmmul is A^T*B: row 1 col 1");
+}
+
 static void test_matrix_transform(void) {
     psp_vfpu_reset();
     float m[4][4], v[4];
@@ -291,9 +315,11 @@ static void test_matrix_transform(void) {
             CHECK_F(psp_cpu.v[d[r]], m[basis][r], "vtfm of a basis vector is that column");
     }
 
-    /* Multiplying by the identity must be a no-op, in both operand positions. */
+    /* Multiplying by the identity must be a no-op, in both operand positions.
+     * vmmul uses its first operand transposed, so M * I is written with M's
+     * transposed view, 0x28 (the E form of matrix 2). */
     psp_vmidt(0x00, 4);
-    psp_vmmul(0x0C, 0x08, 0x00, 4);
+    psp_vmmul(0x0C, 0x28, 0x00, 4);
     float out[4][4];
     get_matrix(0x0C, 4, out);
     for (int c = 0; c < 4; c++)
@@ -327,7 +353,7 @@ static void test_matrix_transform(void) {
     for (int i = 0; i < 4; i++) psp_cpu.v[t[i]] = in[i];
 
     /* (A*B) * x */
-    psp_vmmul(0x14, 0x08, 0x10, 4);       /* matrix 5 */
+    psp_vmmul(0x14, 0x28, 0x10, 4);       /* matrix 5 = A*B, via E-form A */
     psp_vtfm(0x1C, 0x14, 0x18, 4);        /* matrix 7 */
     float combined[4];
     int d[4];
@@ -432,6 +458,7 @@ int main(void) {
     test_compare();
     test_matrix_ops();
     test_matrix_transform();
+    test_vmmul_orientation();
     test_conversions();
 
     psp_mem_free();
