@@ -51,6 +51,7 @@ the wrong moment or from the wrong field.*
 - **`jal .+8` is the get-PC idiom, not a call.** Its target is no longer made
   a function, so the rest of the routine no longer runs twice —
   *[@Tzeentchnet](https://github.com/Tzeentchnet)* (#14)
+
 **Known open**
 - `bgezal`/`bltzal` to another function drops the code after the call (#16).
 - Computed jumps into unlabelled blocks need a way to force labels (#15).
