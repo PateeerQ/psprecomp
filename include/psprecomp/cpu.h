@@ -39,6 +39,14 @@ enum {
 /* Canonical ABI register names, indexed by the enum above. */
 extern const char *const psp_reg_names[PSP_NUM_GPR];
 
+/* One guest call in flight: the return site the call expects, and the call it
+ * was made from. Nodes live on the host stack of the call site that made them;
+ * see psp_ra_is_jump() in dispatch.h. `ret` is 0 for a call made by the host. */
+typedef struct psp_frame {
+    uint32_t ret;
+    struct psp_frame *prev;
+} psp_frame;
+
 typedef struct {
     uint32_t r[PSP_NUM_GPR];   /* r[0] is hardwired zero; see psp_set_reg() */
     uint32_t hi, lo;
@@ -51,6 +59,12 @@ typedef struct {
      * Indexed linearly here; vfpu.h provides the matrix/row/column views. */
     float    v[128];
     uint32_t vfpu_cc;          /* VFPU condition codes (vcmp results) */
+
+    /* The guest calls in flight, innermost first, and the return site being
+     * unwound to when a `jr $ra` returned past them. Part of the register file
+     * so each thread's chain moves with its context. */
+    psp_frame *frame;
+    uint32_t   unwind;
 } psp_cpu_state;
 
 extern psp_cpu_state psp_cpu;

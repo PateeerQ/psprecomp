@@ -4524,8 +4524,69 @@ now frees its slot. `test_hle` enqueues 100 lists; 93 failed before the fix.
 Result, real threads, 60 s: 3,778 lists finished (was 8), 151,438 vertices,
 and the game is on its title screen, "Press start button", rendered correctly.
 
-## Next
+## Next (as of the title screen)
 
 Three unimplemented calls happen once per frame: `0x8874DBE0`, `0x9A1C91D7` and
 `0x946963F3`. They need names, verified against SHA-1 like the rest, before
 the input path can be trusted. Then: press Start.
+
+
+## From the title screen into a game (2026-10-23)
+
+The harness now presses buttons (`psp_ctrl_set()` from a host thread, keyed
+on the vblank count) and saves screenshots along the way.
+
+**Start reached the game, which then waited for a sound.** The title is the
+last card of the boot-logo sequencer (`0x00081F08`). A read watch on the
+button state showed Start was seen. The sequencer moved to state 3, played a
+jingle and waited for it to finish. It never did, for four separate reasons,
+each found by measuring the sound library:
+
+1. **A fake semaphore timeout.** The sound thread waits forever on its request
+   queue and does not check the result. Our 500-tick cap returned a timeout, so
+   it processed a zeroed request and opened a file named NULL (seen with the
+   new `PSPRECOMP_TRACE_IO`). Unbounded waits now keep waiting while any other
+   thread is alive.
+2. **Audio at a tenth of real time.** The engine times sounds by counting mixed
+   samples. Each blocking output waited in 1 ms ticks, and each tick handed the
+   CPU to the main thread for a whole frame. Output now models the hardware
+   queue on the host clock, `sceAudioSetChannelDataLen` is implemented, and
+   Windows timer resolution is 1 ms (15.6 ms per tick before).
+3. **Looping one-shots.** The jingle's voices are keyed with loop mode 1, and
+   their ADPCM data ends with a loop-end flag of 1 (end, no repeat). We looped
+   any voice in loop mode, so the jingle played forever. `test_hle` showed why
+   the existing SAS test never caught it: its helper passed the fifth argument
+   on the stack, so loop mode was always 0.
+4. (Not a bug: the call-count report capped at 40 rows had hidden the
+   `__sceSasSetVoice` calls, which sent the search into the sound engine's
+   internals for a while. The report is uncapped in the harness now.)
+
+The title then fades to the **Job Share menu**.
+
+**Cross on the menu corrupted the heap.** It starts loading the microgame,
+and `sp NOT RESTORED by callee 0x000824D0: -896` came just before a garbage
+pointer in the allocator. `0x000824D0` is a hand-written bit-stream
+decompressor, split by discovery into about 35 bodies, which:
+- calls helpers with `bltzal`, which we emitted as a tail transfer (#16), and
+- leaves some helpers by branching straight to its own epilogue, and returns
+  from others through `jr $ra` stubs reached by branches, using `$ra` as a
+  continuation.
+
+A C `return` per `jr $ra` cannot express either. Calls now push the return site
+they expect on a shadow stack (`psp_frame` nodes on the host stack). A `jr $ra`
+is a return, an unwind to an outer call, or a jump through dispatch. Link
+branches are calls. A frame-ret probe in a scratch copy of the generated C
+showed the bad `$ra` came from a helper that never returned. That is what
+ruled out the simpler designs tried first.
+
+Result, real threads, scripted Start then Cross: the title, the menu, about 25
+seconds of loading (the decompressor running to completion), then **a game of
+Lumberjack**, rendered correctly, and its paycheck screen when the round ends.
+0 bad memory accesses, 0 dispatch misses, no stack imbalance.
+
+## Next
+
+- Menu text renders as black boxes.
+- Sound is mixed but not played to a device.
+- Loading takes about 25 seconds; worth profiling.
+- Play the microgame with input, not just let it time out.

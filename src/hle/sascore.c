@@ -14,7 +14,17 @@
 #include "psprecomp/hle.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+
+/* PSPRECOMP_TRACE_SAS=1 logs every voice setup call with its arguments. The
+ * quickest answer to "a sound started and nothing came out". */
+static int sas_trace(void) {
+    static int t = -1;
+    if (t < 0) t = getenv("PSPRECOMP_TRACE_SAS") != NULL;
+    return t;
+}
+#define SAS_LOG(...) do { if (sas_trace()) fprintf(stderr, __VA_ARGS__); } while (0)
 
 #define SAS_VOICES     32
 #define SAS_MAX_GRAIN  1024
@@ -32,6 +42,8 @@ typedef struct {
     uint32_t vag_size;
     int      loop;
     uint32_t pos;           /* byte offset of the current 16-byte block */
+    uint32_t loop_pos;      /* block flagged loop-start (flag bit 2) */
+    int      end_pending;   /* the last block decoded was a loop end with no repeat */
     int      sample_idx;    /* 0..27 within the block */
     int      hist1, hist2;  /* ADPCM history */
     int16_t  decoded[28];
@@ -85,13 +97,17 @@ static int clamp16(int v) {
 }
 
 /* Decode the 16-byte ADPCM block at the voice's current position into its
- * 28-sample buffer. Returns 0 when the voice has run off the end. */
+ * 28-sample buffer. Returns 0 when the voice has run off the end.
+ *
+ * Each block's flag byte carries the loop: bit 2 marks the loop start, bit 0 a
+ * loop end, and bit 1 says the end repeats (back to the loop start) rather than
+ * stops. Repeating also needs the voice's loop mode. A 7 is the terminator
+ * block after the data. Looping the whole sample whenever the loop mode was set
+ * kept WTF's one-shot title jingle (an end flag of 1) playing forever, and its
+ * title waits for the jingle to finish. */
 static int decode_block(sas_voice *v) {
-    if (v->pos + 16 > v->vag_size) {
-        if (!v->loop) return 0;
-        v->pos = 0;
-        v->hist1 = v->hist2 = 0;
-    }
+    if (v->end_pending) return 0;
+    if (v->pos + 16 > v->vag_size) return 0;
 
     uint32_t at = v->vag_addr + v->pos;
     uint8_t hdr   = psp_read8(at);
@@ -101,12 +117,8 @@ static int decode_block(sas_voice *v) {
     int filter = (hdr >> 4) & 0x0F;
     if (filter > 4) filter = 0;          /* out of range: treat as no prediction */
 
-    /* Flag 7 marks the end of the sample. */
-    if (flags == 7) {
-        if (!v->loop) return 0;
-        v->pos = 0;
-        return decode_block(v);
-    }
+    if (flags == 7) return 0;
+    if (flags & 4) v->loop_pos = v->pos;
 
     for (int i = 0; i < 28; i++) {
         uint8_t byte = psp_read8(at + 2 + (uint32_t)(i / 2));
@@ -124,6 +136,10 @@ static int decode_block(sas_voice *v) {
     }
 
     v->pos += 16;
+    if (flags & 1) {
+        if ((flags & 2) && v->loop) v->pos = v->loop_pos;
+        else v->end_pending = 1;         /* play this block, then stop */
+    }
     v->decoded_valid = 1;
     return 1;
 }
@@ -198,6 +214,7 @@ static sas_voice *voice_arg(void) {
 }
 
 static void hle_Init(void) {
+    SAS_LOG("sas: Init grain %u voices %u mode %u rate %u\n", psp_arg(1), psp_arg(2), psp_arg(3), psp_arg(4));
     /* (sasCore, grain, maxVoices, outputMode, sampleRate) */
     g_grain       = psp_arg(1);
     g_max_voices  = psp_arg(2);
@@ -209,6 +226,7 @@ static void hle_Init(void) {
 }
 
 static void hle_SetVoice(void) {
+    SAS_LOG("sas: SetVoice v%u vag 0x%08X size 0x%X loop %u\n", psp_arg(1), psp_arg(2), psp_arg(3), psp_arg(4));
     /* (sasCore, voice, vagAddr, size, loopmode) */
     sas_voice *v = voice_arg();
     if (!v) { psp_ret(SCE_KERNEL_ERROR_ERROR); return; }
@@ -216,6 +234,8 @@ static void hle_SetVoice(void) {
     v->vag_size = psp_arg(3);
     v->loop     = (int)psp_arg(4);
     v->pos = 0;
+    v->loop_pos = 0;
+    v->end_pending = 0;
     v->sample_idx = 0;
     v->hist1 = v->hist2 = 0;
     v->decoded_valid = 0;
@@ -223,6 +243,7 @@ static void hle_SetVoice(void) {
 }
 
 static void hle_SetPitch(void) {
+    SAS_LOG("sas: SetPitch v%u 0x%X\n", psp_arg(1), psp_arg(2));
     sas_voice *v = voice_arg();
     if (!v) { psp_ret(SCE_KERNEL_ERROR_ERROR); return; }
     v->pitch = psp_arg(2);
@@ -230,6 +251,7 @@ static void hle_SetPitch(void) {
 }
 
 static void hle_SetVolume(void) {
+    SAS_LOG("sas: SetVolume v%u l %d r %d\n", psp_arg(1), (int)psp_arg(2), (int)psp_arg(3));
     /* (sasCore, voice, l, r, el, er) -- the last two are the reverb sends. */
     sas_voice *v = voice_arg();
     if (!v) { psp_ret(SCE_KERNEL_ERROR_ERROR); return; }
@@ -251,6 +273,7 @@ static void hle_SetADSR(void) {
 }
 
 static void hle_SetSimpleADSR(void) {
+    SAS_LOG("sas: SetSimpleADSR v%u 0x%X 0x%X\n", psp_arg(1), psp_arg(2), psp_arg(3));
     sas_voice *v = voice_arg();
     if (!v) { psp_ret(SCE_KERNEL_ERROR_ERROR); return; }
     /* The packed form encodes rates in two 16-bit words. Without the exact
@@ -264,12 +287,15 @@ static void hle_SetSimpleADSR(void) {
 }
 
 static void hle_SetKeyOn(void) {
+    SAS_LOG("sas: KeyOn v%u\n", psp_arg(1));
     sas_voice *v = voice_arg();
     if (!v) { psp_ret(SCE_KERNEL_ERROR_ERROR); return; }
     v->playing = 1;
     v->ended = 0;
     v->paused = 0;
     v->pos = 0;
+    v->loop_pos = 0;
+    v->end_pending = 0;
     v->sample_idx = 0;
     v->frac = 0;
     v->hist1 = v->hist2 = 0;
@@ -281,6 +307,7 @@ static void hle_SetKeyOn(void) {
 }
 
 static void hle_SetKeyOff(void) {
+    SAS_LOG("sas: KeyOff v%u\n", psp_arg(1));
     sas_voice *v = voice_arg();
     if (!v) { psp_ret(SCE_KERNEL_ERROR_ERROR); return; }
     v->env_state = ENV_RELEASE;
@@ -333,6 +360,13 @@ static void mix_to_guest(uint32_t out_addr, int add) {
         if (sl || sr) g_samples_nonzero++;
     }
     g_frames_rendered++;
+    if (sas_trace() && (g_frames_rendered <= 20 || g_frames_rendered % 64 == 0)) {
+        int playing = 0;
+        for (int i = 0; i < SAS_VOICES; i++) playing += g_voice[i].playing;
+        fprintf(stderr, "sas: Core #%llu out 0x%08X grain %u voices playing %d nonzero so far %llu\n",
+                (unsigned long long)g_frames_rendered, out_addr, n, playing,
+                (unsigned long long)g_samples_nonzero);
+    }
 }
 
 static void hle_Core(void) {

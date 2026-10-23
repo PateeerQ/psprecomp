@@ -1,6 +1,7 @@
 /* psprecomp — address → function dispatch. See include/psprecomp/dispatch.h. */
 
 #include "psprecomp/dispatch.h"
+#include "psprecomp/cpu.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -180,6 +181,22 @@ void psp_dispatch_set_budget(uint64_t calls, void (*on_exceeded)(void)) {
 }
 
 uint64_t psp_dispatch_calls(void) { return g_calls; }
+
+void psp_call_from_host(uint32_t addr) {
+    psp_frame f = { 0, psp_cpu.frame };
+    psp_cpu.frame = &f;
+    psp_dispatch(addr);
+    psp_cpu.frame = f.prev;
+    psp_cpu.unwind = 0;              /* no unwind crosses a host frame */
+}
+
+int psp_ra_is_jump(uint32_t ra) {
+    const psp_frame *f = psp_cpu.frame;
+    if (!f || !f->ret || ra == f->ret) return 0;
+    for (const psp_frame *g = f->prev; g && g->ret; g = g->prev)
+        if (g->ret == ra) { psp_cpu.unwind = ra; return 0; }
+    return 1;
+}
 
 void psp_dispatch(uint32_t addr) {
     if (g_budget && ++g_calls >= g_budget) {

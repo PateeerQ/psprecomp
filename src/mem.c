@@ -25,6 +25,26 @@ static void note_write(uint32_t addr, uint32_t width) {
                 width * 8, addr, g_wwatch, psp_trace_last());
 }
 
+/* Watch reads of one address: "which code looks at this" is the question when
+ * a value is right in memory and the game still does not act on it. A field
+ * read every frame would repeat one name forever, so each distinct reading
+ * function is printed once. */
+static uint32_t g_rwatch;
+static uint32_t g_rfns[16];
+static int g_rfn_n;
+void psp_mem_watch_read(uint32_t addr) { g_rwatch = addr; g_rfn_n = 0; }
+
+static void note_read(uint32_t addr, uint32_t width) {
+    if (!g_rwatch || addr + width <= g_rwatch || addr > g_rwatch) return;
+    uint32_t fn = psp_trace_last();
+    for (int i = 0; i < g_rfn_n; i++) if (g_rfns[i] == fn) return;
+    if (g_rfn_n < 16) {
+        g_rfns[g_rfn_n++] = fn;
+        fprintf(stderr, "read%u of 0x%08X (watch 0x%08X) from fn 0x%08X\n",
+                width * 8, addr, g_rwatch, fn);
+    }
+}
+
 /* Bad accesses were only ever counted, which says an initialiser went wrong
  * without saying which one. The addresses are what identify it, and there are
  * few enough of them (28 in the current run) to simply print. */
@@ -117,6 +137,7 @@ void *psp_mem_ptr(uint32_t addr, uint32_t size) {
 #define READ_BODY(TYPE)                              \
     void *p = psp_mem_ptr(addr, (uint32_t)sizeof(TYPE)); \
     if (!p) { bad_access(addr, 0, (int)sizeof(TYPE)); return 0; }      \
+    note_read(addr, (uint32_t)sizeof(TYPE));         \
     TYPE v;                                          \
     memcpy(&v, p, sizeof v);                         \
     return v;

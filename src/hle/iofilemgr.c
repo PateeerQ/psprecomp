@@ -101,6 +101,11 @@ static void hle_Open(void) {
 
     FILE *f = fopen(host, mode);
     if (!f && (flags & PSP_O_CREAT)) f = fopen(host, "w+b");
+    /* PSPRECOMP_TRACE_IO=1 names every open and whether it worked. A game
+     * that cannot find its assets usually does not crash; it waits. */
+    if (getenv("PSPRECOMP_TRACE_IO"))
+        fprintf(stderr, "io: open \"%s\" -> \"%s\" flags 0x%X: %s\n",
+                guest, host, flags, f ? "ok" : "not found");
     if (!f) {
         /* A failed open is normal (a game probing for a save file) and is not
          * worth a warning, but the mapped path is worth knowing when a game

@@ -619,6 +619,10 @@ static void mark_labels(ectx *c, const a_func *fn) {
             c->is_label[widx(an, in.target)] = 1;
         if (in.has_delay_slot && owned_by(an, a + 4, owner))
             c->is_slot[widx(an, a + 4)] = 1;
+        /* A call's return site is a label, so that a `jr $ra` used as a jump
+         * back to it has somewhere to land through dispatch; see jr $ra. */
+        if (in.is_call && !in.is_get_pc && owned_by(an, a + 8, owner))
+            c->is_label[widx(an, a + 8)] = 1;
     }
 
     /* A delay slot can also be somebody's branch target. Arriving through the
@@ -787,6 +791,54 @@ static void emit_function(ectx *c, const a_func *fn) {
          * sites in this module have a slot another body owns. */
         const int taken_slot = slot_decoded && !have_slot && slot_repeatable(&slot);
 
+        if (in.is_branch && in.is_call) {        /* bgezal / bltzal / *all */
+            /* A conditional CALL, not a conditional jump. The taken path calls
+             * the target and, when it returns, carries on after the delay
+             * slot; it used to be emitted as a tail transfer, so the code after
+             * the call never ran and the caller's frame was abandoned. Reported
+             * in #16; WTF's decompressor calls its helpers with `bltzal`, and
+             * leaked its 896-byte frame on every one.
+             *
+             * MIPS32 writes $ra for all four *AL forms whether or not the branch
+             * is taken, before the delay slot runs, so the slot sees it. */
+            char cond[128];
+            branch_cond(cond, sizeof cond, &in);
+            fprintf(f, "    { int _c = (%s);\n", cond);
+            fprintf(f, "      %s = 0x%08Xu;\n", RN[31], a + 8);
+            if (in.is_likely) fprintf(f, "      if (_c) {\n");
+            if (have_slot || (in.is_likely && taken_slot)) {
+                comment(c, &slot);
+                emit_simple(c, &slot, "        ");
+            }
+            if (!in.is_likely) {
+                fprintf(f, "      if (_c) {\n");
+                if (taken_slot) { comment(c, &slot); emit_simple(c, &slot, "        "); }
+            }
+            fprintf(f, "        PSP_CALL_BEGIN(0x%08Xu);\n", a + 8);
+            if (is_import(an, in.target))
+                fprintf(f, "          psp_import_%08X();\n", in.target);
+            else if (is_function(an, in.target))
+                fprintf(f, "          psp_func_%08X();\n", in.target);
+            else if (owned_by(an, in.target, owner))
+                fprintf(f, "          psp_at_%08X();\n", in.target);
+            else
+                fprintf(f, "          psp_dispatch(0x%08Xu);\n", in.target);
+            fprintf(f, "        PSP_CALL_END(0x%08Xu);\n", a + 8);
+            /* With the slot in another body, the walk ends here and the
+             * not-taken path reaches the slot by falling out. The taken path
+             * has already run its copy, so it resumes after it explicitly. */
+            if (!have_slot) {
+                if (owned_by(an, a + 8, owner) && c->is_label[widx(an, a + 8)])
+                    fprintf(f, "        goto L_%08X;\n", a + 8);
+                else
+                    fprintf(f, "        psp_dispatch(0x%08Xu); return;\n", a + 8);
+            }
+            fprintf(f, "      } }\n");
+            if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 1);
+            if (have_slot) a += 4;
+            continue;
+        }
+
         if (in.is_branch) {
             char cond[128];
             branch_cond(cond, sizeof cond, &in);
@@ -904,15 +956,36 @@ static void emit_function(ectx *c, const a_func *fn) {
              * nothing. */
             const unsigned link = in.is_indirect ? in.rd : 31u;
             if (link) fprintf(f, "    %s = 0x%08Xu;\n", RN[link], a + 8);
-            if (in.is_indirect) fprintf(f, "    psp_dispatch(_t); }\n");
+            /* The callee's frame expects to return to a + 8; see the jr $ra
+             * case. Saved and restored, because the callee sets its own. */
+            fprintf(f, "    PSP_CALL_BEGIN(0x%08Xu);\n", link ? a + 8 : 0u);
+            if (in.is_indirect) fprintf(f, "    psp_dispatch(_t);\n");
             else                emit_static_call(c, in.target);
+            fprintf(f, "    PSP_CALL_END(0x%08Xu);\n", link ? a + 8 : 0u);
+            if (in.is_indirect) fprintf(f, "    }\n");
             if (have_slot && c->is_label[widx(an, a + 4)]) emit_slot_alias(c, a, &slot, 1);
             if (have_slot) a += 4;               /* see the branch case above */
             continue;
         }
 
         if (in.is_return) {                      /* jr $ra */
+            /* `jr $ra` is a return only while $ra holds the return site of
+             * the call that made this frame. Code may also use $ra as a
+             * continuation: call a helper, then *branch* to a stub ending in
+             * `jr $ra`, which jumps back to just after the call. Emitted as
+             * `return`, that leaves the whole frame early with its stack still
+             * allocated. WTF's decompressor at 0x000824D0 does exactly this,
+             * across a dozen split bodies, and the 896 bytes it leaked
+             * corrupted the heap. Every call pushes the return site it
+             * expects (PSP_CALL_BEGIN), and psp_ra_is_jump() decides: a
+             * return, a return past nested calls (unwound by PSP_CALL_END),
+             * or a jump, which goes through dispatch in tail position like any
+             * other cross-body transfer.
+             *
+             * jr reads $ra before its delay slot, as for jr $rN below. */
+            fprintf(f, "    { uint32_t _t = r_ra;\n");
             if (have_slot) { comment(c, &slot); emit_simple(c, &slot, "    "); }
+            fprintf(f, "    if (psp_ra_is_jump(_t)) { psp_dispatch(_t); return; } }\n");
             /* Only a genuine `jr $ra` is expected to leave $sp as it found it.
              * Tail jumps and cross-function transfers are emitted as `return`
              * too, but their epilogue runs in the target, so $sp is correctly
@@ -1036,6 +1109,13 @@ static void emit_header(FILE *f, const ectx *c, const emit_opts *o) {
         "#include <psprecomp/vfpu.h>\n"
         "\n"
         "#ifdef __cplusplus\nextern \"C\" {\n#endif\n"
+        "\n"
+        "/* A guest call: push the return site it expects, and after it returns,\n"
+        " * stop an unwind aimed here or pass on one aimed further out. */\n"
+        "#define PSP_CALL_BEGIN(r) { psp_frame _f; _f.ret = (r); _f.prev = psp_cpu.frame;"
+        " psp_cpu.frame = &_f;\n"
+        "#define PSP_CALL_END(r) psp_cpu.frame = _f.prev; if (psp_cpu.unwind) {"
+        " if (psp_cpu.unwind == (r)) psp_cpu.unwind = 0; else return; } }\n"
         "\n"
         "/* Build with -DPSPRECOMP_TRACE to record every function entry. Costs\n"
         " * one store per call when on, and nothing at all when off. A dispatch\n"

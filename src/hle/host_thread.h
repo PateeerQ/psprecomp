@@ -18,6 +18,7 @@ static void host_thread_error(void) {
 #endif
 #include <windows.h>
 #include <process.h>
+#include <mmsystem.h>
 
 #define HOST_TLS __declspec(thread)
 typedef HANDLE host_thread;
@@ -37,8 +38,22 @@ static void host_cond_wait(host_cond *c, host_mutex *m) {
     if (!SleepConditionVariableSRW(c, m, INFINITE, 0)) host_thread_error();
 }
 /* Windows condition waits have millisecond granularity. Round UP so a short
- * park never becomes a nonblocking poll; this is not a real-time guarantee. */
-static uint64_t host_deadline_us(void) { return (uint64_t)GetTickCount64() * 1000ull; }
+ * park never becomes a nonblocking poll; this is not a real-time guarantee.
+ *
+ * Both the wait and the clock used to follow the system timer, which ticks
+ * every 15.6 ms by default: a 1 ms park cost 15.6 ms of host time, and WTF's
+ * audio thread, which parks once per 5.8 ms buffer, ran 17 times slower than
+ * real time. host_timer_init() asks for 1 ms resolution, and deadlines use the
+ * performance counter rather than GetTickCount64. */
+static void host_timer_init(void) { timeBeginPeriod(1); }
+static uint64_t host_deadline_us(void) {
+    static LARGE_INTEGER freq;
+    LARGE_INTEGER now;
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&now);
+    return (uint64_t)(now.QuadPart / freq.QuadPart) * 1000000ull +
+           (uint64_t)(now.QuadPart % freq.QuadPart) * 1000000ull / (uint64_t)freq.QuadPart;
+}
 static int host_cond_until(host_cond *c, host_mutex *m, uint64_t deadline) {
     uint64_t now = host_deadline_us();
     if (now >= deadline) return 1;
@@ -100,6 +115,7 @@ static void host_mutex_unlock(host_mutex *m) { if (pthread_mutex_unlock(m)) host
 static void host_cond_signal(host_cond *c) { if (pthread_cond_signal(c)) host_thread_error(); }
 static void host_cond_broadcast(host_cond *c) { if (pthread_cond_broadcast(c)) host_thread_error(); }
 static void host_cond_wait(host_cond *c, host_mutex *m) { if (pthread_cond_wait(c, m)) host_thread_error(); }
+static void host_timer_init(void) { }   /* POSIX sleeps are already fine-grained */
 static uint64_t host_deadline_us(void) {
     struct timespec ts;
     if (clock_gettime(CLOCK_REALTIME, &ts)) host_thread_error();
