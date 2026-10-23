@@ -12,6 +12,13 @@
 static psp_hle_entry g_entry[HLE_MAX];
 static psp_hle_fn    g_fn[HLE_MAX];
 static int           g_count;
+static uint64_t      g_calls[HLE_MAX];      /* per registered entry */
+
+/* Unimplemented NIDs, counted individually: "9 so far" says nothing about
+ * whether one call is being made a billion times. */
+#define UNIMPL_DISTINCT 64
+static struct { uint32_t nid; uint64_t n; } g_unimpl[UNIMPL_DISTINCT];
+static int g_unimpl_n;
 
 void psp_hle_register(uint32_t nid, const char *lib, const char *name, psp_hle_fn fn) {
     /* Re-registering replaces, so a game repo can override one function
@@ -126,6 +133,7 @@ void psp_hle_call(uint32_t nid) {
         fprintf(stderr, "psp_hle_call ENTERED for 0x237DBD4F (%d entries registered)\n", g_count);
     for (int i = 0; i < g_count; i++) {
         if (g_entry[i].nid == nid) {
+            g_calls[i]++;
             g_fn[i]();
             if (psp_cpu.r[PSP_REG_V0] == 0) note_zero(nid, g_entry[i].name);
             return;
@@ -142,6 +150,12 @@ void psp_hle_call(uint32_t nid) {
      * them happily. One that genuinely needed the result will fail visibly
      * soon after, with this line already in the log. */
     g_unimpl_total++;
+    {
+        int k = 0;
+        while (k < g_unimpl_n && g_unimpl[k].nid != nid) k++;
+        if (k == g_unimpl_n && g_unimpl_n < UNIMPL_DISTINCT) g_unimpl[g_unimpl_n++].nid = nid;
+        if (k < g_unimpl_n) g_unimpl[k].n++;
+    }
     if (g_unimpl_logged < UNIMPL_LOGGED) {
         g_unimpl_logged++;
         fprintf(stderr, "psprecomp: unimplemented firmware call 0x%08X\n", nid);
@@ -171,6 +185,25 @@ void psp_hle_unimplemented_reset(void) {
 }
 
 uint64_t psp_hle_zero_calls(void) { return g_zero_n; }
+
+/* Every firmware function called, busiest first. A game that is slow rather
+ * than stuck shows here what it is spending its calls on. */
+void psp_hle_dump_counts(FILE *out, int limit) {
+    typedef struct { uint64_t n; uint32_t nid; const char *name; } count_row;
+    count_row row[HLE_MAX + UNIMPL_DISTINCT];
+    int rows = 0;
+    for (int i = 0; i < g_count; i++)
+        if (g_calls[i]) { row[rows].n = g_calls[i]; row[rows].nid = g_entry[i].nid; row[rows].name = g_entry[i].name; rows++; }
+    for (int k = 0; k < g_unimpl_n; k++) { row[rows].n = g_unimpl[k].n; row[rows].nid = g_unimpl[k].nid; row[rows].name = NULL; rows++; }
+    for (int i = 1; i < rows; i++)          /* insertion sort: tens of rows */
+        for (int j = i; j > 0 && row[j].n > row[j - 1].n; j--) {
+            count_row t = row[j]; row[j] = row[j - 1]; row[j - 1] = t;
+        }
+    fprintf(out, "firmware calls, busiest first:\n");
+    for (int i = 0; i < rows && i < limit; i++)
+        fprintf(out, "  %12llu  0x%08X  %s\n", (unsigned long long)row[i].n, row[i].nid,
+                row[i].name ? row[i].name : "(unimplemented)");
+}
 
 const char *psp_str(uint32_t addr, char *dst, size_t cap) {
     size_t n = 0;

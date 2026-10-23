@@ -511,6 +511,20 @@ static void test_ge_display_list(void) {
           (unsigned long long)psp_ge_vertex_count());
 
     CHECK(call(psp_nid("sceGeDrawSync"), 0, 0, 0, 0) == 0, "draw sync succeeds");
+
+    /* A finished list frees its queue slot: a game enqueues one per frame,
+     * and there are only a few slots. */
+    uint64_t lists_before = psp_ge_command_count();
+    int failed = 0;
+    for (int f = 0; f < 100; f++) {
+        uint32_t id = call(psp_nid("sceGeListEnQueue"), LIST, 0, 0, 0);
+        if (id & 0x80000000u) failed++;
+    }
+    CHECK(failed == 0, "100 finished lists enqueue without running out of slots: %d failed", failed);
+    CHECK(psp_ge_command_count() - lists_before == 600,
+          "all 100 lists ran: %llu commands", (unsigned long long)(psp_ge_command_count() - lists_before));
+    CHECK(call(psp_nid("sceGeListUpdateStallAddr"), qid, LIST, 0, 0) == 0,
+          "moving the stall of a finished list is not an error");
     CHECK(call(psp_nid("sceGeEdramGetAddr"), 0, 0, 0, 0) == PSP_VRAM_BASE,
           "eDRAM is the VRAM window");
     CHECK(call(psp_nid("sceGeEdramGetSize"), 0, 0, 0, 0) == PSP_VRAM_SIZE,

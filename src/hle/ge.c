@@ -481,7 +481,11 @@ static void run_list(ge_queue *q) {
         case GE_END:
         case GE_FINISH:
             if (cmd == GE_FINISH) g_ge.finishes++;
+            /* A finished list gives its slot back. Keeping it used meant the
+             * ninth enqueue failed, and WTF then dropped 3,870 of 3,885
+             * frames while running at full speed. */
             q->done = 1;
+            q->used = 0;
             return;
 
         case GE_SIGNAL:
@@ -654,8 +658,15 @@ static void hle_ListEnQueue(void)     { enqueue(0); }
 static void hle_ListEnQueueHead(void) { enqueue(1); }
 
 static void hle_ListUpdateStallAddr(void) {
-    ge_queue *q = find_queue(psp_arg(0));
-    if (!q) { psp_ret(SCE_KERNEL_ERROR_UNKNOWN_UID); return; }
+    uint32_t id = psp_arg(0);
+    ge_queue *q = find_queue(id);
+    if (!q) {
+        /* A list that already finished has released its slot; moving its
+         * stall is harmless. An id never issued is an error. */
+        psp_ret(id >= 0x00080000u && id < g_next_id ? SCE_KERNEL_ERROR_OK
+                                                    : SCE_KERNEL_ERROR_UNKNOWN_UID);
+        return;
+    }
     q->stall = psp_arg(1) & ~3u;
     if (!q->done) run_list(q);          /* the new stall released more commands */
     psp_ret(SCE_KERNEL_ERROR_OK);

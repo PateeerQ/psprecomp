@@ -54,6 +54,10 @@ void     psp_hle_unimplemented_reset(void);
 /* Every zero-returning call ever made, not just the ZERO_HISTORY ring. */
 uint64_t psp_hle_zero_calls(void);
 
+/* Call counts per firmware function, busiest first, up to `limit` rows.
+ * Unimplemented NIDs are counted individually too. */
+void psp_hle_dump_counts(FILE *out, int limit);
+
 /* Every registered entry, for the coverage report a game repo wants: which of
  * a module's imports actually exist yet. */
 typedef struct {
