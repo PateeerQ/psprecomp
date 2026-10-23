@@ -752,6 +752,45 @@ static void check_indirect_target_before_slot(void) {
     }
 }
 
+/* ---- jal .+8: the get-PC idiom ---------------------------------------------
+ *
+ * Hand-written code loads the PC by calling its own return address. That is
+ * not a call: the "target" is the rest of the same routine. Treated as one, it
+ * becomes a phantom function that runs once as the callee and again when the
+ * caller falls through into it.
+ *
+ *   08804000  jal   08804008     $ra = 08804008
+ *   08804004  nop
+ *   08804008  addu  $v0,$ra,$zero
+ *   0880400C  jr    $ra
+ *   08804010  nop
+ */
+static const uint32_t GET_PC_CODE[] = {
+    0x0E201002u,   /* 08804000  jal   08804008     */
+    0x00000000u,   /* 08804004  nop                */
+    0x03E01021u,   /* 08804008  addu  $v0,$ra,$zero */
+    0x03E00008u,   /* 0880400C  jr    $ra          */
+    0x00000000u,   /* 08804010  nop                */
+};
+
+static void check_get_pc_is_not_a_call(void) {
+    uint32_t seed = BASE;
+    int n = 0;
+    char *src = emit_synthetic("t_get_pc", GET_PC_CODE, 5, &seed, 1, &n);
+    CHECK(n == 1, "jal .+8 does not split the routine: %d functions, want 1", n);
+    if (src) {
+        const char *jal  = strstr(src, "/* 08804000  jal");
+        const char *link = jal ? strstr(jal, "r_ra = 0x08804008u;") : NULL;
+        const char *next = link ? strstr(link, "r_v0 = r_ra + r_zero;") : NULL;
+        CHECK(next != NULL, "jal .+8 links $ra and carries straight on");
+        /* Depending on discovery order the old output called the phantom
+         * directly or went through dispatch; both run the tail twice. */
+        expect_absent(src, "psp_func_08804008();", "jal .+8 makes no direct call");
+        expect_absent(src, "psp_dispatch(", "jal .+8 does not dispatch either");
+        free(src);
+    }
+}
+
 int main(void) {
     uint8_t code[sizeof CODE];
     for (size_t i = 0; i < sizeof CODE / sizeof CODE[0]; i++) {
@@ -948,6 +987,7 @@ int main(void) {
     check_taken_path_runs_the_slot();
     check_terminal_transfer_stays_tail();
     check_indirect_target_before_slot();
+    check_get_pc_is_not_a_call();
 
     if (failures) {
         printf("\n%d check(s) failed\n", failures);

@@ -478,7 +478,12 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
     case 0x01: op = decode_regimm  (word, addr, &in); break;
 
     case 0x02: op = A_J;   set_jump(&in, addr); break;
-    case 0x03: op = A_JAL; set_jump(&in, addr); in.is_call = 1; in.ends_block = 0; break;
+    case 0x03: op = A_JAL; set_jump(&in, addr); in.is_call = 1; in.ends_block = 0;
+        /* `jal .+8` jumps to its own return address. It is how hand-written
+         * code loads the PC into $ra, not a call: the target is the rest of
+         * the same routine, not a function entry. */
+        in.is_get_pc = in.target == addr + 8;
+        break;
 
     case 0x04: op = A_BEQ;  set_branch(&in, addr, 0); break;
     case 0x05: op = A_BNE;  set_branch(&in, addr, 0); break;

@@ -141,6 +141,7 @@ typedef struct {
     unsigned is_likely      : 1;  /* *L form: delay slot nullified if not taken */
     unsigned has_delay_slot : 1;
     unsigned ends_block     : 1;  /* control leaves here unconditionally */
+    unsigned is_get_pc      : 1;  /* jal .+8: links $ra, calls nothing */
 } a_insn;
 
 /* Decode one little-endian word. Always fills `out` (op == A_INVALID for

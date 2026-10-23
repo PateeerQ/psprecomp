@@ -181,8 +181,10 @@ static int trace_function(walk_ctx *c, uint32_t entry, a_func *out) {
 
             if (in.is_call) {
                 /* jal / jalr / the *al REGIMM forms. Direct calls give us a
-                 * new function; indirect ones we cannot resolve statically. */
-                if (in.has_target && !in.is_indirect) note_call(c, in.target);
+                 * new function; indirect ones we cannot resolve statically.
+                 * A get-PC `jal .+8` gives nothing: its target is where this
+                 * walk resumes anyway. */
+                if (in.has_target && !in.is_indirect && !in.is_get_pc) note_call(c, in.target);
                 else if (in.is_indirect) has_indirect = 1;
                 a += 8;                     /* past the delay slot; calls return */
                 continue;
@@ -509,7 +511,7 @@ int a_discover(a_analysis *an, const uint32_t *seeds, int nseeds) {
             if (!a_in_range(an, a)) continue;
             a_insn in;
             a_decode(fetch(an, a), a, &in);
-            if (in.op != A_JAL || !in.has_target) continue;
+            if (in.op != A_JAL || !in.has_target || in.is_get_pc) continue;
             if (!a_in_range(an, in.target) || is_import_stub(an, in.target)) continue;
 
             uint32_t ti = word_index(an, in.target);
