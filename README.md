@@ -174,9 +174,9 @@ It does not yet render. Being specific about which parts are real:
 | **Runtime** | ✅ Working | Register file, memory map with cache mirrors, dispatch, static constructors |
 | **VFPU** | 🔨 Partial | Arithmetic, matrix ops, constants, immediates, prefixes. 108 of 137,748 instructions still trap (0.08%) |
 | **HLE firmware** | 🔨 Partial | 112 registrations across sysmem, threadman, GE, display, sascore, io, ctrl. Every NID verified against SHA-1 of its own name |
-| **GE rasterizer** | 🔨 Partial | Triangles, strips, sprites in through-mode; six tests assert *where* pixels land. Transformed geometry counted, not drawn |
+| **GE rasterizer** | 🔨 Partial | Triangles, strips, fans, sprites; through mode and transformed (world/view/projection, viewport). Textures in every non-DXT format, swizzled or not, with CLUTs; texture function, alpha test, blending, clear mode, scissor. Tests assert *where* pixels land and what colour they are. No depth, lighting or DXT yet |
 | **Threading** | 🔨 Experimental opt-in | Inline execution by default; `PSPRECOMP_REAL_THREADS=ON` enables cooperative host threads, one CPU handed over at waits. See [threading modes](docs/THREADING.md) |
-| **A game on screen** | ❌ Not yet | With default inline execution the flagship gets through start-up with 0 bad memory accesses and 0 dispatch misses, then waits on a thread the run-to-completion model cannot schedule. See [BRINGUP.md](docs/BRINGUP.md) |
+| **A game on screen** | 🔨 First frame | With `PSPRECOMP_REAL_THREADS=ON` the flagship reaches its main loop and draws its first screen, the publisher's legal notice, correctly, in the software renderer. With default inline execution it stops at a semaphore wait. See [BRINGUP.md](docs/BRINGUP.md) |
 
 ### Bring-up instruments
 

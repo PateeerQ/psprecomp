@@ -54,10 +54,10 @@ typedef struct {
     /* Framebuffer target changed (GE_FBP/GE_FBW). */
     void (*set_target)(uint32_t addr, uint32_t stride, int fmt);
 
-    /* One assembled primitive, in screen space, already clipped to the
-     * viewport by the interpreter. Vertices carry position and colour;
-     * texture support extends this struct rather than replacing it. */
-    void (*draw)(int prim, const psp_vertex *v, int count);
+    /* One assembled primitive, in screen space. Vertices carry position,
+     * colour and texture coordinates in texels; `st` carries the texture,
+     * CLUT, texture function, alpha test, blend, clear and scissor state. */
+    void (*draw)(int prim, const psp_vertex *v, int count, const psp_draw_state *st);
 
     /* End of a display list; a good point to flush batched work. */
     void (*finish)(void);
@@ -77,7 +77,7 @@ backend is wrong the same way, which is at least diagnosable.
 
 | Backend | State | Notes |
 |---|---|---|
-| **software** | Working | The reference. Triangles, strips, sprites in through-mode; six tests assert pixel positions. No GPU, no dependencies, runs in CI. |
+| **software** | Working | The reference. Triangles, strips, fans and sprites; textures (all non-DXT formats, swizzle, CLUTs) through the shared `psp_tex_fetch()`; texture function, alpha test, blend, clear mode, scissor. Tests assert pixel positions and colours. No depth, no GPU, no dependencies, runs in CI. |
 | **null** | Working | Counts primitives, draws nothing. What the bring-up host uses when the question is "did it ask to draw". |
 | **sdl3-vulkan** | Not started | The intended presentation path. See below. |
 
