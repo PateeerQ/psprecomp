@@ -177,12 +177,24 @@ static void hle_ChRelease(void) {
     psp_ret(SCE_KERNEL_ERROR_OK);
 }
 
-/* Output blocks on hardware until the previous buffer drains, which is what
- * paces a game's audio thread. With nothing consuming samples it returns
- * immediately -- the block count is what tells you audio is flowing. */
+/* Nothing consumes the samples; the block count is what tells you audio is
+ * flowing. */
 static void hle_Output(void) {
     g_audio_blocks++;
     psp_ret(psp_arg(0) < AUDIO_CHANNELS ? g_audio[psp_arg(0)].samples : 0);
+}
+
+/* The blocking forms hold the caller while the hardware drains a buffer, and
+ * that is what paces a game's audio thread. Returning at once lets a mixer
+ * loop spin forever and starve every other guest thread.
+ * ponytail: one buffer's play time per call (44.1 kHz), not a model of the
+ * hardware queue, which lets the first call return immediately. */
+static void hle_OutputBlocking(void) {
+    uint32_t ch = psp_arg(0);
+    uint32_t samples = ch < AUDIO_CHANNELS ? g_audio[ch].samples : 0;
+    hle_Output();
+    psp_threadman_delay((uint64_t)samples * 1000000u / 44100u);
+    psp_ret(samples);
 }
 
 /* Zero remaining means "ready for more", so a game's audio loop keeps going. */
@@ -241,8 +253,8 @@ void psp_misc_register(void) {
 
     psp_hle_register(0x5EC81C55, "sceAudio", "sceAudioChReserve",            hle_ChReserve);
     psp_hle_register(0x6FC46853, "sceAudio", "sceAudioChRelease",            hle_ChRelease);
-    psp_hle_register(0x136CAF51, "sceAudio", "sceAudioOutputBlocking",       hle_Output);
-    psp_hle_register(0x13F592BC, "sceAudio", "sceAudioOutputPannedBlocking", hle_Output);
+    psp_hle_register(0x136CAF51, "sceAudio", "sceAudioOutputBlocking",       hle_OutputBlocking);
+    psp_hle_register(0x13F592BC, "sceAudio", "sceAudioOutputPannedBlocking", hle_OutputBlocking);
     psp_hle_register(0xE2D56B2D, "sceAudio", "sceAudioOutputPanned",         hle_Output);
     psp_hle_register(0xB011922F, "sceAudio", "sceAudioGetChannelRestLength", hle_GetChannelRestLength);
     psp_hle_register(0xCB2E439E, "sceAudio", "sceAudioSetChannelDataLen",    hle_ok);

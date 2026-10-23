@@ -183,6 +183,9 @@ void psp_threadman_reset(void);
  * is the usual caller: one core means "let a frame pass" is "let the others
  * run". */
 void psp_threadman_yield(void);
+/* Park for `us` of virtual time, as sceKernelDelayThread does. For HLE calls
+ * that block on hardware for a known time, such as blocking audio output. */
+void psp_threadman_delay(uint64_t us);
 void psp_threadman_frame_wait(void);
 
 /* Interrupt masking is per thread, and the cookie is the previous state --

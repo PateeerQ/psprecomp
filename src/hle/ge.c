@@ -247,6 +247,11 @@ static void draw_prim(uint32_t type, uint32_t count) {
     }
 }
 
+/* The framebuffer is always in eDRAM. Games send FBP relative to it, so a high
+ * byte of 0 is the norm, and an absolute 0x04xxxxxx folds to the same place.
+ * Taken literally, 0x88000 is main RAM: for a vaddr-0 module, its own code. */
+static uint32_t fb_vram(void) { return PSP_VRAM_BASE | (g_ge.fbp & (PSP_VRAM_SIZE - 1)); }
+
 /* Walk a list until END/FINISH, the stall address, or a step budget.
  *
  * The budget is not paranoia: a list whose JUMP forms a cycle is a normal
@@ -322,12 +327,12 @@ static void run_list(ge_queue *q) {
         case GE_VTYPE: g_ge.vtype = arg; break;
         case GE_FBP:
             g_ge.fbp = (g_ge.fbp & 0xFF000000u) | arg;
-            psp_render_current()->set_target(g_ge.fbp, g_ge.fbw, 0);
+            psp_render_current()->set_target(fb_vram(), g_ge.fbw, 0);
             break;
         case GE_FBW:
             g_ge.fbw = arg & 0xFFFF;
             g_ge.fbp = (g_ge.fbp & 0x00FFFFFFu) | ((arg & 0xFF0000) << 8);
-            psp_render_current()->set_target(g_ge.fbp, g_ge.fbw, 0);
+            psp_render_current()->set_target(fb_vram(), g_ge.fbw, 0);
             break;
 
         case GE_VADDR: g_ge.vaddr = (q->base | (arg & 0xFFFFFF)); break;
