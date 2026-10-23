@@ -43,6 +43,8 @@ add_library(psprecomp STATIC
     src/hle/hle.c
     src/hle/sysmem.c
     src/hle/threadman.c
+    src/hle/power.c
+    src/hle/intrman.c
     src/hle/display.c
     src/hle/ge.c
     src/hle/sascore.c
@@ -53,6 +55,21 @@ add_library(psprecomp STATIC
 target_include_directories(psprecomp PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
+
+# Runtime VFPU helpers use libm on Unix; propagate it to static-library users.
+if(UNIX)
+    target_link_libraries(psprecomp PUBLIC m)
+endif()
+
+# Real scheduling is experimental; the existing inline model stays the default.
+option(PSPRECOMP_REAL_THREADS "Enable experimental cooperative host-thread scheduling" OFF)
+target_compile_definitions(psprecomp PUBLIC
+    PSPRECOMP_REAL_THREADS=$<BOOL:${PSPRECOMP_REAL_THREADS}>
+)
+if(PSPRECOMP_REAL_THREADS AND NOT WIN32)
+    find_package(Threads REQUIRED)
+    target_link_libraries(psprecomp PUBLIC Threads::Threads)
+endif()
 
 # --- the recompiler -----------------------------------------------------------
 

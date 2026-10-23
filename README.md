@@ -175,8 +175,8 @@ It does not yet render. Being specific about which parts are real:
 | **VFPU** | 🔨 Partial | Arithmetic, matrix ops, constants, immediates, prefixes. 108 of 137,748 instructions still trap (0.08%) |
 | **HLE firmware** | 🔨 Partial | 112 registrations across sysmem, threadman, GE, display, sascore, io, ctrl. Every NID verified against SHA-1 of its own name |
 | **GE rasterizer** | 🔨 Partial | Triangles, strips, sprites in through-mode; six tests assert *where* pixels land. Transformed geometry counted, not drawn |
-| **Threading** | ❌ Not started | Run-to-completion only; no scheduler. Real threads are in review (#9) |
-| **A game on screen** | ❌ Not yet | The flagship gets through start-up with 0 bad memory accesses and 0 dispatch misses, then waits on a thread the run-to-completion model cannot schedule. See [BRINGUP.md](docs/BRINGUP.md) |
+| **Threading** | 🔨 Experimental opt-in | Inline execution by default; `PSPRECOMP_REAL_THREADS=ON` enables cooperative host threads, one CPU handed over at waits. See [threading modes](docs/THREADING.md) |
+| **A game on screen** | ❌ Not yet | With default inline execution the flagship gets through start-up with 0 bad memory accesses and 0 dispatch misses, then waits on a thread the run-to-completion model cannot schedule. See [BRINGUP.md](docs/BRINGUP.md) |
 
 ### Bring-up instruments
 

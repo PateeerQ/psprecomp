@@ -118,6 +118,12 @@ const char *psp_str(uint32_t addr, char *dst, size_t cap);
 #define SCE_KERNEL_ERROR_ILLEGAL_MEMBLOCK 0x800201A9
 #define SCE_KERNEL_ERROR_ILLEGAL_THID    0x80020197
 #define SCE_KERNEL_ERROR_WAIT_TIMEOUT    0x800201A8
+#define SCE_KERNEL_ERROR_THREAD_TERMINATED 0x800201AC
+#define SCE_KERNEL_ERROR_SEMA_ZERO       0x800201AD
+#define SCE_KERNEL_ERROR_EVF_COND        0x800201AF
+/* Added for the power callback slots; the neighbouring codes are corrected on
+ * the UMD/RTC branch (their values arrived from the same pspsdk source). */
+#define SCE_KERNEL_ERROR_ILLEGAL_ARGUMENT 0x800200D2
 
 /* ---- the subsystems ------------------------------------------------------ */
 
@@ -161,7 +167,95 @@ uint64_t psp_audio_blocks(void);
 
 void psp_threadman_init(void);
 void psp_threadman_register(void);
+/* ThreadMan reset is a quiescent-host operation: all guest threads must have
+ * ended first. It reclaims host handles/locks, not guest stack allocations. */
 void psp_threadman_reset(void);
+
+/* ---- the scheduler -------------------------------------------------------
+ *
+ * Default execution is inline. PSPRECOMP_REAL_THREADS=ON opts into one CPU,
+ * handed over explicitly: the boot thread (whoever calls
+ * psp_threadman_reset) runs the module entry, and a thread that blocks gives
+ * the CPU away until it is woken. These are the points where that happens,
+ * for use by the rest of the HLE layer. See src/hle/threadman.c. */
+
+/* Give the CPU away without blocking on anything of the guest's. A frame wait
+ * is the usual caller: one core means "let a frame pass" is "let the others
+ * run". */
+void psp_threadman_yield(void);
+void psp_threadman_frame_wait(void);
+
+/* Interrupt masking is per thread, and the cookie is the previous state --
+ * which is why resuming a nested suspend does not enable interrupts. */
+int  psp_threadman_intr_suspend(void);
+void psp_threadman_intr_resume(uint32_t cookie);
+int  psp_threadman_intr_disabled(void);
+
+/* What the scheduler did, for a host's report. `switches` counts CPU
+ * handovers and `parks` counts blocked calls: a run with threads and no
+ * switches has not actually run them. */
+uint64_t psp_threadman_switches(void);
+uint64_t psp_threadman_parks(void);
+uint64_t psp_threadman_vtime_us(void);
+/* Parks after which another thread had run (so the CPU really was handed over),
+ * and the ones that gave up before the thread they waited for was scheduled.
+ * See the handover in src/hle/threadman.c. */
+uint64_t psp_threadman_handovers(void);
+uint64_t psp_threadman_handover_expired(void);
+void     psp_threadman_dump(FILE *out);
+
+/* ---- callbacks -----------------------------------------------------------
+ *
+ * A callback runs on the thread that created it, at the points where that
+ * thread waits or explicitly asks (sceKernelCheckCallback) -- not at the point
+ * of the notification, which may be another thread entirely. See the callbacks
+ * section of src/hle/threadman.c. */
+
+/* Whether an id names a callback the guest has actually created. A subsystem
+ * that records a callback id (scePower's slots) has to ask first. */
+int psp_callback_valid(uint32_t uid);
+
+/* What delivery did, for a host's report: callbacks that ran, notifications
+ * dropped because the target is not a recompiled function, and passes that hit
+ * the per-tick ceiling. */
+uint64_t psp_threadman_callback_deliveries(void);
+uint64_t psp_threadman_callback_unresolved(void);
+uint64_t psp_threadman_callback_deferred(void);
+
+/* scePower: the power callback slots. No power event exists in this HLE, so a
+ * registered callback is never fired; what is real is the slot handed back to
+ * the caller. See the header of src/hle/power.c. */
+void     psp_power_init(void);
+void     psp_power_register(void);
+void     psp_power_reset(void);
+uint64_t psp_power_registered(void);
+
+/* InterruptManager: sub-interrupt handlers, and the points where an interrupt
+ * is delivered. See the header of src/hle/intrman.c for why a game can be
+ * stuck in a loop that no amount of implementing `sleep` gets it out of. */
+void psp_intrman_init(void);
+void psp_intrman_register(void);
+void psp_intrman_reset(void);
+
+/* Deliver one interrupt to every enabled handler. Called from the places where
+ * the guest explicitly waits for time to pass -- SleepThread, DelayThread and
+ * the vblank wait -- since with no timer there is nothing else to hook. Safe to
+ * call from inside a handler: delivery does not re-enter. */
+void psp_intr_tick(void);
+
+/* 0 until a game registers a handler, and the first number worth looking at
+ * when a wait never ends. */
+int      psp_intr_handlers(void);      /* registered */
+int      psp_intr_enabled(void);       /* registered *and* enabled */
+uint64_t psp_intr_deliveries(void);
+uint64_t psp_intr_unresolved(void);    /* handler address that is not recompiled */
+
+/* How many threads were created and how many were actually started. The gap
+ * between the two is the first thing to look at when a game waits on a flag
+ * nothing ever arms: a created-but-never-started worker explains it exactly,
+ * and no other instrument shows the difference. */
+uint64_t psp_threadman_created(void);
+uint64_t psp_threadman_started(void);
 
 /* Bytes of user memory still available — the cheapest end-to-end check that
  * the allocator is behaving. */
