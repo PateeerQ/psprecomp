@@ -70,8 +70,15 @@ test that fails on the old behaviour, and a clear statement of what it does
   largest magnitude first, with the largest kept even when the table is full.
   A `-656` leak had been hidden behind 24 printed lines of `+16`.
 
-*In review:* #9, real threads with an explicit CPU hand-over, sub-interrupt
-handlers and callbacks delivered where the guest waits.
+Landed in **v0.5.0 "Taking Turns"**:
+- **Real threads with an explicit CPU hand-over (#9).** One host thread per
+  guest thread and a single baton, so `sceKernelStartThread` can return before
+  the worker finishes. Sub-interrupt handlers and callbacks are delivered where
+  the guest waits, on the owning thread. When asked, they put it behind
+  `PSPRECOMP_REAL_THREADS`, wrote a native Win32 adapter alongside pthreads, and
+  extended CI to Windows, Linux and macOS in both modes. An independent review
+  they ran found three lifecycle and masking defects, and each now has a test
+  that failed before the fix.
 
 ### Invictus-potens — [@Invictus-potens](https://github.com/Invictus-potens)
 Brought up Monster Hunter Portable 3rd (NPJB40001). Landed in **v0.4.0
@@ -85,6 +92,25 @@ Brought up Monster Hunter Portable 3rd (NPJB40001). Landed in **v0.4.0
 - **`sceKernelSleepThread` / `sceKernelSleepThreadCB` (#2)**, with NIDs
   verified against the SHA-1 of the name, as the rest of the file is. A game
   calling either one used to stall in the dispatch-miss loop.
+
+### Tzeentchnet — [@Tzeentchnet](https://github.com/Tzeentchnet)
+Measured the toolkit against Killzone: Liberation (`KZL.PRX`, v1.20 US). Every
+PR states which emitted lines change on that module, carries a test that fails
+on the old code, and names its sources. Landed in **v0.5.0 "Taking Turns"**:
+- **VFPU load/store register fields (#12).** `lv.s`/`sv.s`/`lv.q`/`sv.q` took
+  their register from the arithmetic field, which overlaps the base GPR. 10,019
+  of 15,444 emitted VFPU loads and stores on KZL were using the wrong register.
+- **`jr`/`jalr` target read before the delay slot (#13)**, and `jalr` links its
+  encoded `rd`. Found in a hand-written ladder that steps its target in the slot.
+- **`jal .+8` as get-PC (#14).** The phantom function had made the rest of the
+  routine run twice.
+- **VFPU conversion scale and saturation (#17), and `vf2in`/`vf2iu`/`vf2id`
+  (#18).** 30 of KZL's 37 `vi2f` sites had a nonzero scale that was being
+  dropped. Expected values are hardware measurements.
+- Reported **#15** (forcing labels for computed jumps) and **#16** (`bgezal`
+  to another function drops the code after the call).
+
+*In review:* #19, jump-table operands traced to their definitions.
 
 ---
 

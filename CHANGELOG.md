@@ -9,6 +9,53 @@ the time, and none were added afterwards.
 
 *Nothing yet.*
 
+### v0.5.0 — *"Taking Turns"* (October 2026)
+
+*Six pull requests from two people. Guest threads can now really take turns,
+behind a build flag. A new contributor, measuring against Killzone: Liberation,
+fixed five places where the decoder, the emitter or discovery read something at
+the wrong moment or from the wrong field.*
+
+**Runtime and HLE**
+- **Opt-in cooperative threads (`-DPSPRECOMP_REAL_THREADS=ON`).** One host
+  thread per guest thread and a single CPU baton, handed over at blocking
+  calls. `sceKernelStartThread` no longer has to run the entry to completion,
+  so a caller can post work to a worker that waits on it. Sub-interrupt
+  handlers and callbacks are delivered where the guest waits, on the thread
+  that owns them. Native Win32 and pthreads adapters. The default build keeps
+  the inline model. Also `sceKernelMaxFreeMemSize` and a deeper trace history.
+  See [THREADING.md](docs/THREADING.md) —
+  *[@andyst-dev](https://github.com/andyst-dev)* (#9)
+- **`vi2f`/`vf2iz` apply their 5-bit scale, and the float-to-int conversions
+  saturate** to int32, with NaN giving `0x7FFFFFFF`. `vi2f.q ..., 16` was
+  coming out 65536 times too large. Checked against hardware values recorded
+  on a PSP-3000 —
+  *[@Tzeentchnet](https://github.com/Tzeentchnet)* (#17)
+- **`vf2in`/`vf2iu`/`vf2id` are emitted** (nearest-even, up, down) instead of
+  trapping —
+  *[@Tzeentchnet](https://github.com/Tzeentchnet)* (#18)
+
+**Decoder**
+- **`lv.s`/`sv.s`/`lv.q`/`sv.q` read their register from the load/store
+  fields.** It used to take bits from the base GPR. 10,019 of 15,444 VFPU
+  loads and stores on KZL changed register —
+  *[@Tzeentchnet](https://github.com/Tzeentchnet)* (#12)
+
+**Emitter**
+- **`jr`/`jalr` read their target before the delay slot runs**, and `jalr`
+  links the `rd` it encodes (nothing for `$zero`). A slot that steps the
+  target register no longer moves the jump —
+  *[@Tzeentchnet](https://github.com/Tzeentchnet)* (#13)
+
+**Discovery**
+- **`jal .+8` is the get-PC idiom, not a call.** Its target is no longer made
+  a function, so the rest of the routine no longer runs twice —
+  *[@Tzeentchnet](https://github.com/Tzeentchnet)* (#14)
+**Known open**
+- `bgezal`/`bltzal` to another function drops the code after the call (#16).
+- Computed jumps into unlabelled blocks need a way to force labels (#15).
+- Jump-table operands traced to their definitions (#19) is in review.
+
 ### v0.4.0 — *"Handed Over"* (October 2026)
 
 *The first outside contributions: eight pull requests from two people. Most of

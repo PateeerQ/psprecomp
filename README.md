@@ -159,7 +159,7 @@ static void psp_body_0000E06C(uint32_t _entry) {
 
 ## Status
 
-**v0.4.0 — alpha.** See the [CHANGELOG](CHANGELOG.md).
+**v0.5.0 — alpha.** See the [CHANGELOG](CHANGELOG.md).
 
 **A retail PSP game recompiles to C that compiles, links, and executes.**
 It does not yet render. Being specific about which parts are real:
@@ -295,7 +295,7 @@ emulator is a thing you *diff against*, never a thing you link. See
 
 ## Contributors
 
-psprecomp is built by more than one person. See
+psprecomp is built by more than one person: [@andyst-dev](https://github.com/andyst-dev) (#3–#5, #7–#11), [@Tzeentchnet](https://github.com/Tzeentchnet) (#12–#14, #17, #18) and [@Invictus-potens](https://github.com/Invictus-potens) (#2). See
 **[CONTRIBUTORS.md](CONTRIBUTORS.md)** for who did what, in technical detail.
 Outside PRs are welcome; [CONTRIBUTING.md](CONTRIBUTING.md) says how.
 
