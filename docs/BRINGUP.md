@@ -4500,10 +4500,32 @@ Three more things stood between that and a picture, each measured:
 Result, real threads, 60 s: the first correct game frame, the publisher's legal
 notice, in the software renderer.
 
-## Next
+## Still open from that session
 
 Depth testing, lighting and DXT are not implemented, and transformed primitives
 with a vertex behind the eye are dropped rather than clipped. The game draws 15
 display lists in 60 seconds, so it is still on its boot screens; what it waits
 on next is the open question. `vtfm`'s orientation is consistent with the fixed
 `vmmul` (the composition test holds) but not yet pinned by a game.
+
+
+## "Slow" was dropped frames: the title screen (2026-10-23)
+
+The game drew 15 display lists in 60 seconds and looked slow. New per-function
+call counts (`psp_hle_dump_counts()`) said otherwise. In those 60 seconds it
+called `sceGeListEnQueue`, `sceDisplaySetFrameBuf` and
+`sceDisplayWaitVblankStartCB` about 3,885 times each, so its frame loop was
+running at full speed.
+
+The GE had 8 queue slots and never released one, so the ninth enqueue
+returned `NO_MEMORY` and every later frame was dropped unseen. A finished list
+now frees its slot. `test_hle` enqueues 100 lists; 93 failed before the fix.
+
+Result, real threads, 60 s: 3,778 lists finished (was 8), 151,438 vertices,
+and the game is on its title screen, "Press start button", rendered correctly.
+
+## Next
+
+Three unimplemented calls happen once per frame: `0x8874DBE0`, `0x9A1C91D7` and
+`0x946963F3`. They need names, verified against SHA-1 like the rest, before
+the input path can be trusted. Then: press Start.

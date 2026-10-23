@@ -7,8 +7,7 @@ the time, and none were added afterwards.
 
 ### Unreleased
 
-*The first game frame: WTF's publisher notice, drawn by the software
-renderer.*
+*WTF reaches its title screen, drawn by the software renderer.*
 
 **Rendering**
 - **Textures.** 565/5551/4444/8888 and CLUT 4/8/16/32-bit, linear or
@@ -23,6 +22,15 @@ renderer.*
   no clipping yet.
 - **`psp_ge_dump_stats()` lists every undecoded GE command** by opcode, with
   its last argument, instead of printing the first 64 to stderr.
+
+- **A finished display list frees its queue slot.** Slots were never
+  released, so the ninth `sceGeListEnQueue` failed and every frame after it was
+  dropped. WTF ran its loop at full speed and drew 15 lists in 60 seconds; it
+  now draws all of them. Stall updates on a finished list succeed.
+
+**HLE**
+- **`psp_hle_dump_counts()`** prints call counts per firmware function,
+  busiest first, with unimplemented NIDs counted individually.
 
 **VFPU**
 - **`vmmul` transposes its first operand.** `vmmul.q M000, E100, M200` is
