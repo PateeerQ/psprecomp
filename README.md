@@ -176,7 +176,7 @@ It does not yet render. Being specific about which parts are real:
 | **HLE firmware** | 🔨 Partial | 112 registrations across sysmem, threadman, GE, display, sascore, io, ctrl. Every NID verified against SHA-1 of its own name |
 | **GE rasterizer** | 🔨 Partial | Triangles, strips, fans, sprites; through mode and transformed (world/view/projection, viewport). Textures in every non-DXT format, swizzled or not, with CLUTs; texture function, alpha test, blending, clear mode, scissor. Tests assert *where* pixels land and what colour they are. No depth, lighting or DXT yet |
 | **Threading** | 🔨 Experimental opt-in | Inline execution by default; `PSPRECOMP_REAL_THREADS=ON` enables cooperative host threads, one CPU handed over at waits. See [threading modes](docs/THREADING.md) |
-| **A game on screen** | 🔨 First frame | With `PSPRECOMP_REAL_THREADS=ON` the flagship reaches its main loop and draws its first screen, the publisher's legal notice, correctly, in the software renderer. With default inline execution it stops at a semaphore wait. See [BRINGUP.md](docs/BRINGUP.md) |
+| **A game on screen** | 🔨 Title screen | With `PSPRECOMP_REAL_THREADS=ON` the flagship runs its frame loop at full speed and reaches its title screen, drawn correctly by the software renderer. With default inline execution it stops at a semaphore wait. See [BRINGUP.md](docs/BRINGUP.md) |
 
 ### Bring-up instruments
 
