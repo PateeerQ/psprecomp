@@ -1004,6 +1004,8 @@ static void park_ticks(uint64_t us, int kind) {
 /* One wait, one delivery -- the same contract as every other wait point here,
  * so a handler's call count stays a readable number rather than depending on
  * how long the guest asked to sleep. */
+void psp_threadman_delay(uint64_t us) { park_ticks(us, W_DELAY); }
+
 static void hle_DelayThread(void) {
     park_ticks(psp_arg(0), W_DELAY);
     deliver_tick();
