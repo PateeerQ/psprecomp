@@ -7,7 +7,13 @@ the time, and none were added afterwards.
 
 ### Unreleased
 
-*Nothing yet.*
+**Runtime and HLE**
+- **The GE framebuffer address is VRAM-relative.** FBP `0x88000` drew into
+  main RAM at `0x00088000`, which for a vaddr-0 module is its own code. On WTF
+  Lumberjack every clear overwrote a jump table and the screen stayed empty.
+- **`sceAudioOutputBlocking`/`sceAudioOutputPannedBlocking` block** for one
+  buffer's play time, through a new `psp_threadman_delay()`. Returning at once
+  let a mixer thread spin and starve every other thread under real threads.
 
 ### v0.5.0 — *"Taking Turns"* (October 2026)
 

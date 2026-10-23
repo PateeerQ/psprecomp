@@ -4410,3 +4410,58 @@ The run reports 1.8 million stack-balance violations. Every one that was
 printed is a positive delta (`+16` at `0x0004D824` first), the known
 split-continuation shape. `psp_sp_hist()` (#8) gives the full breakdown by
 site.
+
+
+## v0.5.0 on Lumberjack: real threads, then two runtime bugs (2026-10-22)
+
+Built with `-DPSPRECOMP_REAL_THREADS=ON` (#9). The harness has to keep calling
+`psp_threadman_yield()` after `module_start` returns, or the run ends there:
+`StartThread` no longer runs `user_main` inline.
+
+**1. The audio mixer starved every other thread.** Past the semaphore, the CPU
+stayed on `sgx-psp-pcm-th` for the whole run: 480 million passes of the loop at
+`0x0002B1C0`, with 4 switches and 0 parks. The function trace showed the loop
+was WaitSema, `__sceSasCore`, `sceAudioOutputPannedBlocking`, SignalSema. On
+hardware the blocking output is what paces it. Ours returned at once. The two
+blocking outputs now park for one buffer's play time (`samples / 44100` s)
+through the new `psp_threadman_delay()`.
+
+**2. The renderer drew into the game.** With all 7 threads taking turns, the
+run reported 391,680 pixels written, but VRAM was all zeros. It then died in a
+virtual call through a null object, which at vaddr 0 reads code instead of
+faulting. Working back from that, measured at each step:
+- the bad `this` came from `$s0`/`$sp` being wrong after `0x000831CC` returned
+  (`-64`);
+- that was two calls to `0x0004B8EC` at `-32` each, which is a bytecode
+  interpreter at `0x000525BC` whose `jr $v1` went to `0xFFFFFFFF`, so it was a
+  dispatch miss that returned without its epilogue;
+- its jump table at `0x00096D6C` was valid for the first 40 runs, then held
+  `0xFFFFFFFF`;
+- a write watch on the table named `sceGeListUpdateStallAddr`, our GE
+  interpreter.
+
+The game sends FBP `0x88000`, VRAM-relative, as `sceGuDrawBuffer` does. The GE
+code passed it to the renderer as an absolute address, so every clear filled
+`0x00088000`-`0x00110000` of main RAM with white. That range is Lumberjack's
+own code and rodata. The framebuffer address now folds into eDRAM.
+`test_raster` covers the relative form. The existing test passed an absolute
+`0x04000000`, which is why it never caught this.
+
+Results, real threads, 60 s watchdog:
+
+| | v0.5.0 | + both fixes |
+|---|---|---|
+| thread switches | 4 | 33,224 |
+| vblanks | 0 | 3,864 |
+| display lists | 0 | 15 |
+| bad memory accesses | 3.2 billion | 0 |
+| dispatch misses | 3 | 0 |
+| displayed framebuffer | none | `0x04088000`, solid white |
+
+The game reaches its main loop and runs it for the whole window.
+
+## Next
+
+Textures. VRAM holds the game's art (a `MIG.00.1PSP` GIM header at
+`0x04154000`), but the software renderer draws only flat vertex colour, so every
+sprite is white. 36 vertices are also skipped as transformed or position-less.
