@@ -7,7 +7,38 @@ the time, and none were added afterwards.
 
 ### Unreleased
 
-*WTF reaches its title screen, drawn by the software renderer.*
+*WTF goes from its title screen, through the Job Share menu, into a game of
+Lumberjack and its paycheck screen.*
+
+**Emitter**
+- **A branch-and-link is a conditional call.** `bgezal`/`bltzal` and the
+  likely forms call their target and carry on after the delay slot, and link
+  `$ra` whether or not they are taken. The taken path used to be a tail
+  transfer, so the caller's frame was abandoned. Reported, with the analysis,
+  by *[@Tzeentchnet](https://github.com/Tzeentchnet)* (#16).
+- **`jr $ra` follows the guest's calls, not C's.** Every call pushes the return
+  site it expects onto a shadow stack on the host stack. A `jr $ra` to that
+  site is a return; to an outer call's site it unwinds to that call; to anywhere
+  else it is a jump through dispatch. WTF's decompressor uses `$ra` as a
+  continuation and returns from helpers by branching to its own epilogue, and
+  leaked an 896-byte frame per call into the heap. Every call's return site is
+  now a label.
+
+**Runtime and HLE**
+- **An unbounded wait does not time out while another thread could end it.**
+  WTF's sound thread waits forever on a request queue and does not check the
+  result; a fake timeout made it open a file named NULL. A waiter with no other
+  live thread still reports and gives up.
+- **Blocking audio output models the hardware queue on the host clock**, and
+  **`sceAudioSetChannelDataLen` is implemented.** WTF's audio ran at about a
+  tenth of real time, so its title jingle, which it waits for, never finished.
+- **SAS voices honour the ADPCM block loop flags.** A loop end without the
+  repeat bit stops the voice even in loop mode. The title jingle had looped
+  forever.
+- **Windows timer resolution is raised to 1 ms** under real threads, and
+  deadlines use the performance counter. Each scheduler tick had cost 15.6 ms.
+- `psp_call_from_host()` runs guest code from thread entries, callbacks,
+  interrupt handlers and constructors.
 
 **Rendering**
 - **Textures.** 565/5551/4444/8888 and CLUT 4/8/16/32-bit, linear or
@@ -28,9 +59,16 @@ the time, and none were added afterwards.
   dropped. WTF ran its loop at full speed and drew 15 lists in 60 seconds; it
   now draws all of them. Stall updates on a finished list succeed.
 
-**HLE**
+**Instruments**
 - **`psp_hle_dump_counts()`** prints call counts per firmware function,
   busiest first, with unimplemented NIDs counted individually.
+- **`psp_mem_watch_read()`** names each function that reads an address.
+- **`PSPRECOMP_TRACE_IO=1`** logs every file open and its result, and
+  **`PSPRECOMP_TRACE_SAS=1`** logs SAS voice setup and audio channel sizes.
+
+**Tests**
+- `test_hle`'s five-argument helper put the fifth argument on the stack, as o32
+  does; the PSP passes it in `$t0`, so every fifth argument arrived as 0.
 
 **VFPU**
 - **`vmmul` transposes its first operand.** `vmmul.q M000, E100, M200` is
