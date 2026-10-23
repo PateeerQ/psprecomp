@@ -428,16 +428,15 @@ void psp_vtfm(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
     for (int r = 0; r < size; r++) psp_cpu.v[d[r]] = out[r];
 }
 
-/* Matrix product, composed from the same transform used above so the two
- * cannot disagree: each column of the result is a column of vt transformed by
- * vs.
+/* Matrix product: Md = Ms^T * Mt. The first operand is used transposed, which
+ * is why code writes `vmmul.q M000, E100, M200` (E = the transposed view) to
+ * get M100 * M200.
  *
- * NOTE: the operand ORIENTATION here is not independently verified. The maths
- * is right for the convention stated above, and the identity/composition tests
- * hold, but those hold for the transposed convention too -- they cannot tell
- * the two apart. If recompiled geometry comes out scrambled rather than
- * absent, this is the first thing to check against an oracle. Recorded rather
- * than glossed, because a wrong orientation produces plausible output. */
+ * Verified against a game rather than assumed. WTF's matrix multiply at
+ * 0x0002F494 is exactly that idiom, and with it the projection matrix reaches
+ * the GE column-major, with its translation in elements 12-14, as the GE
+ * expects. Without the transpose it arrived transposed, and the first
+ * transformed vertex landed at (-83408, -47266). */
 void psp_vmmul(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
     if (!take_prefixes(psp_cpu.pc, "vmmul")) return;
     float a[4][4], b[4][4], out[4][4];
@@ -447,7 +446,7 @@ void psp_vmmul(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
     for (int c = 0; c < size; c++)
         for (int r = 0; r < size; r++) {
             float sum = 0.0f;
-            for (int k = 0; k < size; k++) sum += a[k][r] * b[c][k];
+            for (int k = 0; k < size; k++) sum += a[r][k] * b[c][k];
             out[c][r] = sum;
         }
     matrix_write(vd, size, out);

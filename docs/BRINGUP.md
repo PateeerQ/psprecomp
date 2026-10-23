@@ -4460,8 +4460,50 @@ Results, real threads, 60 s watchdog:
 
 The game reaches its main loop and runs it for the whole window.
 
-## Next
+## Next (as of the morning of 2026-10-23)
 
 Textures. VRAM holds the game's art (a `MIG.00.1PSP` GIM header at
 `0x04154000`), but the software renderer draws only flat vertex colour, so every
 sprite is white. 36 vertices are also skipped as transformed or position-less.
+
+
+## Textures, the transform, and a wrong VFPU orientation (2026-10-23)
+
+**What Lumberjack asks for.** The GE report now lists every undecoded command
+by opcode with its last argument. That showed:
+- a swizzled CLUT4 512x512 texture in VRAM with an 8888 CLUT;
+- texture function modulate with texture alpha;
+- src-alpha blending and an "alpha > 0" alpha test;
+- clear mode and an 8888 framebuffer.
+
+Logging each primitive showed the full set of draws: per frame, a clear, one
+textured quad in *transformed* mode (float positions and UVs), a depth-only
+clear, and a near-transparent full-screen fade sprite. All of it was built and
+tested (`test_raster`) before the game was run again.
+
+Three more things stood between that and a picture, each measured:
+
+1. **The fade sprite painted the frame white.** Its vertices have no colour, so
+   the hardware uses the material colour, here `0x6BE820` with alpha 9. We used
+   opaque white.
+2. **The depth-only clear wiped the frame.** CLEAR's flags (bit 8 colour, bit 9
+   alpha, bit 10 depth) were ignored.
+3. **The projection matrix reached the GE transposed.** Its translation sat in
+   elements 3/7/11 instead of 12-14, and the first vertex transformed to
+   (-83408, -47266). A RAM search found both forms of the ortho matrix side by
+   side. A write watch on the transposed copy named `0x0002F494`, the game's
+   matrix multiply: four `lv.q` columns of each operand, then
+   `vmmul.q M000, E100, M200`. That idiom only yields `M100 * M200` if `vmmul`
+   transposes its first operand. Ours did not, and `src/vfpu.c` had flagged the
+   orientation as unverified. With the transpose, the quad lands at (0,0)-(479,272).
+
+Result, real threads, 60 s: the first correct game frame, the publisher's legal
+notice, in the software renderer.
+
+## Next
+
+Depth testing, lighting and DXT are not implemented, and transformed primitives
+with a vertex behind the eye are dropped rather than clipped. The game draws 15
+display lists in 60 seconds, so it is still on its boot screens; what it waits
+on next is the open question. `vtfm`'s orientation is consistent with the fixed
+`vmmul` (the composition test holds) but not yet pinned by a game.

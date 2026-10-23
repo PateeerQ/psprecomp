@@ -33,6 +33,9 @@ static int failures;
 #define FB     0x04000000u          /* eDRAM */
 #define LIST   0x08800000u
 #define VERTS  0x08810000u
+#define TEX    0x08820000u
+#define CLUT   0x08830000u
+#define TEXLIN 0x08840000u
 
 /* VTYPE: 8888 colour, 16-bit position, through mode. */
 #define VTYPE_2D  ((7u << 2) | (2u << 7) | (1u << 23))
@@ -162,24 +165,67 @@ static void test_clipping(void) {
     CHECK(pixel(479, 271) == 0, "far corner untouched: 0x%08X", pixel(479, 271));
 }
 
-/* Transformed geometry is not implemented. It must be *counted*, not drawn at
- * the wrong place — wrong pixels are harder to diagnose than no pixels. */
-static void test_transformed_is_skipped(void) {
+/* Transformed geometry goes through world, view and projection, then the
+ * viewport and offset the way sceGuViewport(2048, 2048, 480, 272) and
+ * sceGuOffset(2048 - 240, 2048 - 136) set them up: clip-space (-1, 1) is the
+ * top-left pixel. A world translation of 0.25 must move the quad 60 pixels
+ * right, which is what pins the matrices' column order. Texture coordinates
+ * are normalised: 0..1 spans the whole texture. */
+static uint32_t fbits(float f) { union { float f; uint32_t u; } c; c.f = f; return c.u; }
+static void fcmd(uint8_t op, float f) { cmd(op, fbits(f) >> 8); }
+
+#define VTYPE_3D  (3u | (7u << 2) | (3u << 7))      /* float uv, 8888, float xyz */
+
+static void fvertex(int idx, float x, float y, float u, float v) {
+    uint32_t a = VERTS + (uint32_t)idx * 24;        /* u v (8) colour (4) x y z (12) */
+    psp_write32(a + 0, fbits(u));
+    psp_write32(a + 4, fbits(v));
+    psp_write32(a + 8, 0xFFFFFFFFu);
+    psp_write32(a + 12, fbits(x));
+    psp_write32(a + 16, fbits(y));
+    psp_write32(a + 20, 0);
+}
+
+static void test_transformed_quad(void) {
+    for (int y = 0; y < 2; y++)
+        for (int x = 0; x < 2; x++)
+            psp_write32(TEX + (uint32_t)(y * 2 + x) * 4, 0xFF000000u | (uint32_t)(0x40 * (y * 2 + x + 1)));
     psp_ge_reset();
     clear_fb();
     g_pc = 0;
     cmd(0x10, (VERTS >> 8) & 0xFF0000);
     cmd(0x9C, FB & 0xFFFFFF);
     cmd(0x9D, ((FB >> 8) & 0xFF0000) | 480);
-    cmd(0x12, VTYPE_2D & ~(1u << 23));   /* through bit cleared */
+    cmd(0x12, VTYPE_3D);
     cmd(0x01, VERTS & 0xFFFFFF);
-    vertex(0, 10, 10, 0xFFFFFFFFu);
-    vertex(1, 110, 110, 0xFFFFFFFFu);
-    cmd(0x04, (6u << 16) | 2);
+    fcmd(0x42, 240.0f);  fcmd(0x43, -136.0f);       /* XSCALE, YSCALE */
+    fcmd(0x45, 2048.0f); fcmd(0x46, 2048.0f);       /* XPOS, YPOS */
+    cmd(0x4C, (2048 - 240) << 4);                   /* OFFSETX, 12.4 */
+    cmd(0x4D, (2048 - 136) << 4);                   /* OFFSETY */
+    cmd(0x3A, 0);                                   /* WORLD: identity + (0.25, 0, 0) */
+    const float world[12] = { 1, 0, 0,  0, 1, 0,  0, 0, 1,  0.25f, 0, 0 };
+    for (int k = 0; k < 12; k++) fcmd(0x3B, world[k]);
+    cmd(0x1E, 1);                                   /* 2x2 8888 texture */
+    cmd(0xA0, TEX & 0xFFFFFF);
+    cmd(0xA8, ((TEX >> 8) & 0xFF0000) | 2);
+    cmd(0xB8, (1u << 8) | 1u);
+    cmd(0xC3, 3);
+    cmd(0xC9, 3);                                   /* replace */
+    /* Clip-space square (-0.5, 0.5)-(0.5, -0.5): screen (120, 68)-(360, 204)
+     * before the translation, (180, 68)-(420, 204) after. */
+    fvertex(0, -0.5f,  0.5f, 0, 0);
+    fvertex(1,  0.5f,  0.5f, 1, 0);
+    fvertex(2, -0.5f, -0.5f, 0, 1);
+    fvertex(3,  0.5f, -0.5f, 1, 1);
+    cmd(0x04, (4u << 16) | 4);                      /* triangle strip */
     end_list();
 
-    CHECK(psp_ge_pixels() == 0, "transformed geometry must not be drawn, got %llu px",
-          (unsigned long long)psp_ge_pixels());
+    CHECK(pixel(185, 75) == 0xFF000040u, "top-left quarter shows texel (0,0): 0x%08X", pixel(185, 75));
+    CHECK(pixel(415, 75) == 0xFF000080u, "top-right quarter shows texel (1,0): 0x%08X", pixel(415, 75));
+    CHECK(pixel(185, 200) == 0xFF0000C0u, "bottom-left quarter shows texel (0,1): 0x%08X", pixel(185, 200));
+    CHECK(pixel(175, 136) == 0, "world translation moved the left edge past x=175: 0x%08X", pixel(175, 136));
+    CHECK(pixel(425, 136) == 0, "right edge stops before x=425: 0x%08X", pixel(425, 136));
+    CHECK(pixel(300, 64) == 0, "top edge is at y=68: 0x%08X", pixel(300, 64));
 }
 
 static void test_triangle_strip(void) {
@@ -233,6 +279,216 @@ static void test_backend_selection(void) {
     CHECK(psp_render_select("software") == 0, "software reselectable");
 }
 
+/* ---- textures ------------------------------------------------------------
+ *
+ * Textured vertices: 16-bit u/v in texels, 8888 colour, 16-bit position,
+ * through mode. Components are aligned to their own size, so the layout is
+ * u v (4) colour (4) x y z (6), padded to 16. */
+#define VTYPE_TEX  (2u | (7u << 2) | (2u << 7) | (1u << 23))
+
+static void tvertex(int idx, int x, int y, int u, int v, uint32_t rgba) {
+    uint32_t a = VERTS + (uint32_t)idx * 16;
+    psp_write16(a + 0, (uint16_t)u);
+    psp_write16(a + 2, (uint16_t)v);
+    psp_write32(a + 4, rgba);
+    psp_write16(a + 8, (uint16_t)x);
+    psp_write16(a + 10, (uint16_t)y);
+    psp_write16(a + 12, 0);
+}
+
+/* A list with a texture bound: `fmt` at TEX, w x h (powers of two), buffer
+ * width w, modulate with texture alpha. */
+static void begin_tex_list(int fmt, int logw, int logh, int swizzle) {
+    g_pc = 0;
+    cmd(0x10, (VERTS >> 8) & 0xFF0000);
+    cmd(0x9C, FB & 0xFFFFFF);
+    cmd(0x9D, ((FB >> 8) & 0xFF0000) | 480);
+    cmd(0x12, VTYPE_TEX);
+    cmd(0x01, VERTS & 0xFFFFFF);
+    cmd(0x1E, 1);                                  /* TME */
+    cmd(0xA0, TEX & 0xFFFFFF);                     /* TBP0 */
+    cmd(0xA8, ((TEX >> 8) & 0xFF0000) | (1u << logw)); /* TBW0 */
+    cmd(0xB8, ((uint32_t)logh << 8) | (uint32_t)logw); /* TSIZE0 */
+    cmd(0xC3, (uint32_t)fmt);                      /* TPSM */
+    cmd(0xC2, (uint32_t)swizzle);                  /* TMODE */
+    cmd(0xC9, 1u << 8);                            /* TFUNC modulate, RGBA */
+}
+
+/* An 8888 4x4 texture whose texel (x, y) is 0xFF0000xy-ish: unique per texel,
+ * so a sampling error names the texel it picked. */
+static uint32_t texel_id(int x, int y) { return 0xFF000000u | (uint32_t)(y * 16 + x + 1) * 0x010101u; }
+
+static void test_textured_sprite(void) {
+    for (int y = 0; y < 4; y++)
+        for (int x = 0; x < 4; x++)
+            psp_write32(TEX + (uint32_t)(y * 4 + x) * 4, texel_id(x, y));
+    psp_ge_reset();
+    clear_fb();
+    begin_tex_list(3, 2, 2, 0);
+    tvertex(0, 10, 20, 0, 0, 0xFFFFFFFFu);
+    tvertex(1, 14, 24, 4, 4, 0xFFFFFFFFu);          /* 1:1 */
+    cmd(0x04, (6u << 16) | 2);
+    end_list();
+    int bad = 0;
+    for (int y = 0; y < 4; y++)
+        for (int x = 0; x < 4; x++)
+            if (pixel(10 + x, 20 + y) != texel_id(x, y)) bad++;
+    CHECK(bad == 0, "1:1 textured sprite: %d of 16 texels wrong (0,0)=0x%08X (3,2)=0x%08X",
+          bad, pixel(10, 20), pixel(13, 22));
+
+    /* Twice the size: each texel covers 2x2 pixels. */
+    psp_ge_reset();
+    clear_fb();
+    begin_tex_list(3, 2, 2, 0);
+    tvertex(0, 0, 0, 0, 0, 0xFFFFFFFFu);
+    tvertex(1, 8, 8, 4, 4, 0xFFFFFFFFu);
+    cmd(0x04, (6u << 16) | 2);
+    end_list();
+    CHECK(pixel(5, 3) == texel_id(2, 1), "2x scaled: pixel (5,3) is texel (2,1): 0x%08X", pixel(5, 3));
+
+    /* Modulate: a half-grey vertex colour halves each channel. */
+    psp_ge_reset();
+    clear_fb();
+    begin_tex_list(3, 2, 2, 0);
+    psp_write32(TEX, 0xFF80FF40u);
+    tvertex(0, 0, 0, 0, 0, 0xFF808080u);
+    tvertex(1, 1, 1, 1, 1, 0xFF808080u);
+    cmd(0x04, (6u << 16) | 2);
+    end_list();
+    CHECK(pixel(0, 0) == 0xFF408020u, "modulate by half grey: 0x%08X (want 0xFF408020)", pixel(0, 0));
+}
+
+/* Swizzle by moving blocks in storage order, independent of the renderer's
+ * address arithmetic: 16-byte x 8-row blocks, row of blocks after row. */
+static void swizzle_copy(uint32_t dst, uint32_t src, uint32_t row_bytes, uint32_t rows) {
+    uint32_t o = 0;
+    for (uint32_t by = 0; by < rows / 8; by++)
+        for (uint32_t bx = 0; bx < row_bytes / 16; bx++)
+            for (uint32_t r = 0; r < 8; r++)
+                for (uint32_t i = 0; i < 16; i++)
+                    psp_write8(dst + o++, psp_read8(src + (by * 8 + r) * row_bytes + bx * 16 + i));
+}
+
+static void test_clut4_swizzled(void) {
+    /* 64x16 CLUT4: 32 bytes per row, so two blocks across and two down. The
+     * index of texel (x, y) is (x + y) & 15. */
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 64; x += 2) {
+            uint8_t lo = (uint8_t)((x + y) & 15), hi = (uint8_t)((x + 1 + y) & 15);
+            psp_write8(TEXLIN + (uint32_t)(y * 32 + x / 2), (uint8_t)(lo | (hi << 4)));
+        }
+    swizzle_copy(TEX, TEXLIN, 32, 16);
+    for (int i = 0; i < 16; i++) psp_write32(CLUT + (uint32_t)i * 4, 0xFF000000u | (uint32_t)(i * 0x0F0E0D));
+
+    psp_ge_reset();
+    clear_fb();
+    begin_tex_list(4, 6, 4, 1);
+    cmd(0xB0, CLUT & 0xFFFFFF);                    /* CBP */
+    cmd(0xB1, (CLUT >> 8) & 0xF0000);              /* CBPH */
+    cmd(0xC5, (0xFFu << 8) | 3);                   /* CMODE 8888, mask FF */
+    cmd(0xC4, 2);                                  /* CLOAD 2 blocks = 16 entries */
+    tvertex(0, 0, 0, 0, 0, 0xFFFFFFFFu);
+    tvertex(1, 64, 16, 64, 16, 0xFFFFFFFFu);
+    cmd(0x04, (6u << 16) | 2);
+    end_list();
+
+    int bad = 0, fx = -1, fy = -1;
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 64; x++) {
+            uint32_t want = 0xFF000000u | (uint32_t)(((x + y) & 15) * 0x0F0E0D);
+            if (pixel(x, y) != want) { if (!bad) { fx = x; fy = y; } bad++; }
+        }
+    CHECK(bad == 0, "swizzled CLUT4: %d of 1024 wrong, first at (%d,%d) = 0x%08X", bad, fx, fy,
+          fx >= 0 ? pixel(fx, fy) : 0);
+
+    /* The CLUT is captured at CLOAD: rewriting the palette afterwards does not
+     * change a draw that follows without another load. */
+    psp_ge_reset();
+    clear_fb();
+    begin_tex_list(4, 6, 4, 1);
+    cmd(0xB0, CLUT & 0xFFFFFF);
+    cmd(0xB1, (CLUT >> 8) & 0xF0000);
+    cmd(0xC5, (0xFFu << 8) | 3);
+    cmd(0xC4, 2);
+    end_list();
+    psp_write32(CLUT + 4, 0xFF0000FFu);            /* entry 1 -> red, after the load */
+    g_pc = 0;
+    cmd(0x04, (6u << 16) | 2);
+    end_list();
+    CHECK(pixel(1, 0) == 0xFF0F0E0Du, "CLUT is copied at load, not read at draw: 0x%08X", pixel(1, 0));
+}
+
+static void test_alpha_test_and_blend(void) {
+    psp_write32(TEX + 0, 0x00FFFFFFu);             /* texel 0: transparent */
+    psp_write32(TEX + 4, 0x800000FFu);             /* texel 1: half-alpha red */
+
+    /* Alpha test GREATER 0 drops the transparent texel, keeps the other. */
+    psp_ge_reset();
+    for (int i = 0; i < 4; i++) psp_write32(FB + (uint32_t)i * 4, 0xFFFF0000u);   /* blue */
+    begin_tex_list(3, 1, 0, 0);
+    cmd(0x22, 1);                                  /* ATE */
+    cmd(0xDB, (0xFFu << 16) | 6);                  /* ATST > 0 */
+    tvertex(0, 0, 0, 0, 0, 0xFFFFFFFFu);
+    tvertex(1, 2, 1, 2, 1, 0xFFFFFFFFu);
+    cmd(0x04, (6u << 16) | 2);
+    end_list();
+    CHECK(pixel(0, 0) == 0xFFFF0000u, "alpha test drops alpha-0 texel: 0x%08X", pixel(0, 0));
+    CHECK(pixel(1, 0) == 0x800000FFu, "alpha test keeps alpha-128 texel: 0x%08X", pixel(1, 0));
+
+    /* SRC_ALPHA, ONE_MINUS_SRC_ALPHA, ADD: half red over blue. */
+    psp_ge_reset();
+    for (int i = 0; i < 4; i++) psp_write32(FB + (uint32_t)i * 4, 0xFFFF0000u);
+    begin_tex_list(3, 1, 0, 0);
+    cmd(0x21, 1);                                  /* ABE */
+    cmd(0xDF, (0u << 8) | (3u << 4) | 2u);         /* ALPHA */
+    tvertex(0, 1, 0, 1, 0, 0xFFFFFFFFu);
+    tvertex(1, 2, 1, 2, 1, 0xFFFFFFFFu);
+    cmd(0x04, (6u << 16) | 2);
+    end_list();
+    uint32_t c = pixel(1, 0);
+    int r = (int)(c & 0xFF), b = (int)((c >> 16) & 0xFF), g = (int)((c >> 8) & 0xFF);
+    CHECK(r >= 126 && r <= 130 && b >= 125 && b <= 129 && g == 0,
+          "half red over blue blends to ~(128,0,127): 0x%08X", c);
+}
+
+static void test_clear_mode_and_scissor(void) {
+    psp_write32(TEX, 0xFF00FF00u);
+    psp_ge_reset();
+    clear_fb();
+    begin_tex_list(3, 0, 0, 0);
+    cmd(0xD3, (7u << 8) | 1);                      /* CLEAR on: texture ignored */
+    tvertex(0, 0, 0, 0, 0, 0xFF123456u);
+    tvertex(1, 4, 4, 1, 1, 0xFF123456u);
+    cmd(0x04, (6u << 16) | 2);
+    cmd(0xD3, 0);
+    cmd(0xD4, (2u << 10) | 2u);                    /* SCISSOR (2,2)-(3,3) */
+    cmd(0xD5, (3u << 10) | 3u);
+    tvertex(2, 0, 0, 0, 0, 0xFFFFFFFFu);
+    tvertex(3, 8, 8, 1, 1, 0xFFFFFFFFu);
+    cmd(0x01, (VERTS + 32) & 0xFFFFFF);
+    cmd(0x04, (6u << 16) | 2);
+    end_list();
+    CHECK(pixel(0, 0) == 0xFF123456u, "clear mode writes the vertex colour: 0x%08X", pixel(0, 0));
+    CHECK(pixel(2, 2) == 0xFF00FF00u, "inside the scissor is textured: 0x%08X", pixel(2, 2));
+    CHECK(pixel(5, 5) == 0, "outside the scissor is untouched: 0x%08X", pixel(5, 5));
+    CHECK(pixel(1, 1) == 0xFF123456u, "scissor kept the clear at (1,1): 0x%08X", pixel(1, 1));
+
+    /* A depth-only clear (bit 10) leaves the colour buffer alone. */
+    psp_ge_reset();
+    g_pc = 0;
+    cmd(0x9C, FB & 0xFFFFFF);
+    cmd(0x9D, ((FB >> 8) & 0xFF0000) | 480);
+    cmd(0x12, VTYPE_TEX);
+    cmd(0x10, (VERTS >> 8) & 0xFF0000);
+    cmd(0x01, VERTS & 0xFFFFFF);
+    cmd(0xD3, (4u << 8) | 1);
+    tvertex(0, 0, 0, 0, 0, 0xFF0000FFu);
+    tvertex(1, 4, 4, 1, 1, 0xFF0000FFu);
+    cmd(0x04, (6u << 16) | 2);
+    end_list();
+    CHECK(pixel(0, 0) == 0xFF123456u, "depth-only clear keeps the colour: 0x%08X", pixel(0, 0));
+}
+
 /* FBP is an offset into VRAM: games send the pointer relative to eDRAM
  * (sceGuDrawBuffer's 0x88000 is the second buffer), so the high byte is 0.
  * Taken as an absolute address it lands in main RAM. For a module loaded
@@ -273,9 +529,13 @@ int main(void) {
     test_triangle();
     test_winding();
     test_clipping();
-    test_transformed_is_skipped();
+    test_transformed_quad();
     test_triangle_strip();
     test_framebuffer_is_vram_relative();
+    test_textured_sprite();
+    test_clut4_swizzled();
+    test_alpha_test_and_blend();
+    test_clear_mode_and_scissor();
     test_backend_selection();
 
     psp_mem_free();

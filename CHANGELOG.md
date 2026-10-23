@@ -7,6 +7,29 @@ the time, and none were added afterwards.
 
 ### Unreleased
 
+*The first game frame: WTF's publisher notice, drawn by the software
+renderer.*
+
+**Rendering**
+- **Textures.** 565/5551/4444/8888 and CLUT 4/8/16/32-bit, linear or
+  swizzled, with the CLUT captured at CLOAD as the hardware does. Texture
+  functions modulate, decal, blend, replace and add. Alpha test, blending
+  (every factor and equation), clear mode with its colour/alpha flags, scissor,
+  16-bit framebuffers, and vertices with no colour take the material colour.
+  DXT is drawn magenta and counted.
+- **Transformed geometry.** World, view and projection matrices, viewport and
+  offset, UV scale and offset, and normalised 8/16-bit vertex formats. A
+  primitive with a vertex behind the eye is dropped and counted, since there is
+  no clipping yet.
+- **`psp_ge_dump_stats()` lists every undecoded GE command** by opcode, with
+  its last argument, instead of printing the first 64 to stderr.
+
+**VFPU**
+- **`vmmul` transposes its first operand.** `vmmul.q M000, E100, M200` is
+  `M100 * M200`. That is how WTF multiplies its matrices, and without the
+  transpose its projection matrix reached the GE transposed. The orientation was
+  flagged as unverified in the source; it is now pinned by a hand-worked test.
+
 **Runtime and HLE**
 - **The GE framebuffer address is VRAM-relative.** FBP `0x88000` drew into
   main RAM at `0x00088000`, which for a vaddr-0 module is its own code. On WTF

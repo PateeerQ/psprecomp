@@ -11,6 +11,7 @@
  */
 
 #include "psprecomp/hle.h"
+#include "psprecomp/render.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -45,44 +46,6 @@ void psp_display_init(void) { psp_display_reset(); }
 uint64_t psp_display_vblanks(void) { return g_vblank_count; }
 uint32_t psp_display_framebuffer(void) { return g_fb_addr; }
 
-/* Expand one source pixel to RGBA8888. The 16-bit formats replicate their high
- * bits into the low ones on expansion; simply shifting left leaves the maximum
- * value slightly below full white, which shows up as a washed-out image. */
-static void expand(uint32_t px, uint32_t fmt, uint8_t out[4]) {
-    switch (fmt) {
-    case PSP_DISPLAY_PIXEL_FORMAT_565: {
-        uint32_t r = (px & 0x1F), g = (px >> 5) & 0x3F, b = (px >> 11) & 0x1F;
-        out[0] = (uint8_t)((r << 3) | (r >> 2));
-        out[1] = (uint8_t)((g << 2) | (g >> 4));
-        out[2] = (uint8_t)((b << 3) | (b >> 2));
-        out[3] = 255;
-        break;
-    }
-    case PSP_DISPLAY_PIXEL_FORMAT_5551: {
-        uint32_t r = (px & 0x1F), g = (px >> 5) & 0x1F, b = (px >> 10) & 0x1F;
-        out[0] = (uint8_t)((r << 3) | (r >> 2));
-        out[1] = (uint8_t)((g << 3) | (g >> 2));
-        out[2] = (uint8_t)((b << 3) | (b >> 2));
-        out[3] = (px & 0x8000) ? 255 : 0;
-        break;
-    }
-    case PSP_DISPLAY_PIXEL_FORMAT_4444: {
-        uint32_t r = (px & 0xF), g = (px >> 4) & 0xF, b = (px >> 8) & 0xF, a = (px >> 12) & 0xF;
-        out[0] = (uint8_t)((r << 4) | r);
-        out[1] = (uint8_t)((g << 4) | g);
-        out[2] = (uint8_t)((b << 4) | b);
-        out[3] = (uint8_t)((a << 4) | a);
-        break;
-    }
-    default:
-        out[0] = (uint8_t)(px);
-        out[1] = (uint8_t)(px >> 8);
-        out[2] = (uint8_t)(px >> 16);
-        out[3] = (uint8_t)(px >> 24);
-        break;
-    }
-}
-
 /* Write the current framebuffer as a binary PPM. Returns 0 on success, -1 if
  * no framebuffer has been set yet (which is itself worth knowing during
  * bring-up: the game never got as far as showing anything). */
@@ -98,9 +61,9 @@ int psp_display_capture(const char *path) {
         for (int x = 0; x < PSP_SCREEN_W; x++) {
             uint32_t at = g_fb_addr + (uint32_t)(y * (int)g_fb_width + x) * (uint32_t)bpp;
             uint32_t px = (bpp == 4) ? psp_read32(at) : psp_read16(at);
-            uint8_t rgba[4];
-            expand(px, g_fb_format, rgba);
-            fwrite(rgba, 1, 3, f);       /* PPM is RGB; alpha is dropped */
+            uint32_t c = psp_color_expand(px, (int)g_fb_format);
+            uint8_t rgb[3] = { (uint8_t)c, (uint8_t)(c >> 8), (uint8_t)(c >> 16) };
+            fwrite(rgb, 1, 3, f);        /* PPM is RGB; alpha is dropped */
         }
     }
     fclose(f);
