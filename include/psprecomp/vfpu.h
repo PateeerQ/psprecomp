@@ -75,13 +75,15 @@ enum {
     PSP_VU_RCP, PSP_VU_RSQ, PSP_VU_SQRT, PSP_VU_SIN, PSP_VU_COS,
     PSP_VU_EXP2, PSP_VU_LOG2, PSP_VU_SAT0, PSP_VU_SAT1,
     PSP_VU_NRCP, PSP_VU_NSIN, PSP_VU_REXP2, PSP_VU_ASIN,
-    PSP_VU_F2IZ, PSP_VU_I2F
+    PSP_VU_F2IZ, PSP_VU_I2F,
+    PSP_VU_F2IN, PSP_VU_F2IU, PSP_VU_F2ID    /* psp_vcvt only */
 };
 void psp_vunary(int op, uint32_t vd, uint32_t vs, int size);
 
-/* vf2iz and vi2f with their 5-bit scale immediate (op is PSP_VU_F2IZ or
- * PSP_VU_I2F). vf2iz converts x * 2^scale; vi2f produces int * 2^-scale.
- * psp_vunary's cases for the two are this with scale 0. */
+/* The conversions with their 5-bit scale immediate. vf2in/vf2iz/vf2iu/vf2id
+ * (PSP_VU_F2IN..F2ID) convert x * 2^scale, rounding to nearest, toward zero,
+ * up and down; vi2f (PSP_VU_I2F) produces int * 2^-scale. psp_vunary's
+ * F2IZ and I2F cases are this with scale 0. */
 void psp_vcvt(int op, uint32_t vd, uint32_t vs, int size, int scale);
 
 /* Matrix ops that need no multiply: identity, zero, one, and copy. `size` is

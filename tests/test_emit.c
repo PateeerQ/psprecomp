@@ -989,16 +989,23 @@ int main(void) {
         static const uint32_t CODE_CVT[] = {
             0xD2908488u,   /* vi2f.q  C200, C100, 16 */
             0xD2258488u,   /* vf2iz.q C200, C100, 5  */
+            0xD2008488u,   /* vf2in.q C200, C100, 0  */
+            0xD2438488u,   /* vf2iu.q C200, C100, 3  */
+            0xD27F8488u,   /* vf2id.q C200, C100, 31 */
             0x03E00008u,   /* jr $ra                 */
             0x00000000u,
         };
         uint32_t seed = BASE;
-        char *csrc = emit_synthetic("t_cvt", CODE_CVT, 4, &seed, 1, NULL);
+        char *csrc = emit_synthetic("t_cvt", CODE_CVT, 7, &seed, 1, NULL);
         if (csrc) {
             expect_contains(csrc, "psp_vcvt(PSP_VU_I2F, 8, 4, 4, 16);",
                             "vi2f passes its scale to the runtime");
             expect_contains(csrc, "psp_vcvt(PSP_VU_F2IZ, 8, 4, 4, 5);",
                             "vf2iz passes its scale to the runtime");
+            /* The other three roundings used to emit psp_unimplemented. */
+            expect_contains(csrc, "psp_vcvt(PSP_VU_F2IN, 8, 4, 4, 0);", "vf2in is emitted");
+            expect_contains(csrc, "psp_vcvt(PSP_VU_F2IU, 8, 4, 4, 3);", "vf2iu is emitted");
+            expect_contains(csrc, "psp_vcvt(PSP_VU_F2ID, 8, 4, 4, 31);", "vf2id is emitted");
             free(csrc);
         }
     }
