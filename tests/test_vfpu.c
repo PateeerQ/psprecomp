@@ -343,6 +343,53 @@ static void test_matrix_transform(void) {
                 "vmmul and vtfm agree: (A*B)x == A(Bx)");
 }
 
+/* vf2iz / vi2f with a scale. Every row is a measurement from a PSP-3000,
+ * firmware 6.61 (pspautotests cpu/vfpu/convert_scaled.expected): register bits
+ * in, register bits out. Not models, so the edges are the hardware's:
+ * saturation, NaN of either sign, and inputs only the scale makes nonzero. */
+static void test_conversions(void) {
+    static const struct {
+        int op, scale;
+        uint32_t in[4], want[4];
+    } T[] = {
+        /* NaN, -NaN, +Inf, -Inf */
+        { PSP_VU_F2IZ, 1,  { 0x7FC00000, 0xFFC00000, 0x7F800000, 0xFF800000 },
+                           { 0x7FFFFFFF, 0x7FFFFFFF, 0x7FFFFFFF, 0x80000000 } },
+        /* 0.3, -0.3, 0.7, -0.7: truncation toward zero */
+        { PSP_VU_F2IZ, 5,  { 0x3E99999A, 0xBE99999A, 0x3F333333, 0xBF333333 },
+                           { 0x00000009, 0xFFFFFFF7, 0x00000016, 0xFFFFFFEA } },
+        /* 1000, -1000, 65535.5, -65535.5: the last two saturate */
+        { PSP_VU_F2IZ, 16, { 0x447A0000, 0xC47A0000, 0x477FFF80, 0xC77FFF80 },
+                           { 0x03E80000, 0xFC180000, 0x7FFFFFFF, 0x80000000 } },
+        /* 1e-6, -1e-6, 1e-9, -1e-9: nonzero only because of the scale */
+        { PSP_VU_F2IZ, 31, { 0x358637BD, 0xB58637BD, 0x3089705F, 0xB089705F },
+                           { 0x00000863, 0xFFFFF79D, 0x00000002, 0xFFFFFFFE } },
+        { PSP_VU_I2F,  1,  { 0x7FFFFFFF, 0x80000000, 0x40000000, 0xC0000000 },
+                           { 0x4E800000, 0xCE800000, 0x4E000000, 0xCE000000 } },
+        /* 16.16 fixed point */
+        { PSP_VU_I2F,  16, { 0x12345678, 0xEDCBA988, 0x00000003, 0xFFFFFFFD },
+                           { 0x4591A2B4, 0xC591A2B4, 0x38400000, 0xB8400000 } },
+        { PSP_VU_I2F,  31, { 0x7FFFFFFF, 0x80000000, 0x40000000, 0xC0000000 },
+                           { 0x3F800000, 0xBF800000, 0x3F000000, 0xBF000000 } },
+    };
+
+    psp_vfpu_reset();
+    for (size_t t = 0; t < sizeof T / sizeof T[0]; t++) {
+        int s[4], d[4];
+        psp_vfpu_regs(0x04, 4, s);                   /* C100 */
+        psp_vfpu_regs(0x08, 4, d);                   /* C200 */
+        for (int i = 0; i < 4; i++) memcpy(&psp_cpu.v[s[i]], &T[t].in[i], 4);
+        psp_vcvt(T[t].op, 0x08, 0x04, 4, T[t].scale);
+        for (int i = 0; i < 4; i++) {
+            uint32_t got;
+            memcpy(&got, &psp_cpu.v[d[i]], 4);
+            CHECK(got == T[t].want[i], "%s scale %d, lane %d: 0x%08X -> 0x%08X, want 0x%08X",
+                  T[t].op == PSP_VU_I2F ? "vi2f" : "vf2iz", T[t].scale, i,
+                  T[t].in[i], got, T[t].want[i]);
+        }
+    }
+}
+
 int main(void) {
     if (psp_mem_init() != 0) { printf("memory init failed\n"); return 1; }
     psp_cpu_reset();
@@ -355,6 +402,7 @@ int main(void) {
     test_compare();
     test_matrix_ops();
     test_matrix_transform();
+    test_conversions();
 
     psp_mem_free();
 

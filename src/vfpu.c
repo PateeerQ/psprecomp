@@ -165,6 +165,23 @@ void psp_vscl(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
 static float sat0(float v) { return v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v); }
 static float sat1(float v) { return v < -1.0f ? -1.0f : (v > 1.0f ? 1.0f : v); }
 
+/* The conversions, as measured on a PSP-3000 (pspautotests
+ * cpu/vfpu/convert_scaled). vf2iz truncates x * 2^scale toward zero and
+ * saturates to int32; NaN of either sign gives 0x7FFFFFFF. A plain C cast
+ * would be undefined for all three of those. */
+static uint32_t f2iz(float x, int scale) {
+    if (x != x) return 0x7FFFFFFFu;
+    const double v = ldexp((double)x, scale);    /* exact: float * 2^31 fits a double */
+    if (v >= 2147483648.0)  return 0x7FFFFFFFu;
+    if (v <= -2147483648.0) return 0x80000000u;
+    return (uint32_t)(int32_t)v;                 /* in range, so the cast truncates */
+}
+
+/* vi2f: int * 2^-scale, rounded to float once. */
+static float i2f(uint32_t bits, int scale) {
+    return (float)ldexp((double)(int32_t)bits, -scale);
+}
+
 void psp_vunary(int op, uint32_t vd, uint32_t vs, int size) {
     if (!take_prefixes(psp_cpu.pc, "vunary")) return;
 
@@ -201,11 +218,30 @@ void psp_vunary(int op, uint32_t vd, uint32_t vs, int size) {
         case PSP_VU_SAT1: r = sat1(a);      break;
         /* Conversions move between the float and integer *interpretations* of
          * a vector register; the bits are reinterpreted, not just cast. */
-        case PSP_VU_F2IZ: r = psp_bits_to_f32((uint32_t)(int32_t)a); break;
-        case PSP_VU_I2F:  r = (float)(int32_t)psp_f32_to_bits(a);    break;
+        case PSP_VU_F2IZ: r = psp_bits_to_f32(f2iz(a, 0));    break;
+        case PSP_VU_I2F:  r = i2f(psp_f32_to_bits(a), 0);     break;
         default:          psp_vfpu_unimplemented(psp_cpu.pc, "vunary"); return;
         }
         out[i] = r;
+    }
+    for (int i = 0; i < n; i++) psp_cpu.v[d[i]] = out[i];
+}
+
+void psp_vcvt(int op, uint32_t vd, uint32_t vs, int size, int scale) {
+    if (!take_prefixes(psp_cpu.pc, op == PSP_VU_I2F ? "vi2f" : "vf2iz")) return;
+
+    int d[4], s[4];
+    int n = psp_vfpu_regs(vd, size, d);
+    psp_vfpu_regs(vs, size, s);
+
+    float out[4];
+    for (int i = 0; i < n; i++) {
+        const float a = psp_cpu.v[s[i]];
+        switch (op) {
+        case PSP_VU_F2IZ: out[i] = psp_bits_to_f32(f2iz(a, scale)); break;
+        case PSP_VU_I2F:  out[i] = i2f(psp_f32_to_bits(a), scale);  break;
+        default:          psp_vfpu_unimplemented(psp_cpu.pc, "vcvt"); return;
+        }
     }
     for (int i = 0; i < n; i++) psp_cpu.v[d[i]] = out[i];
 }
