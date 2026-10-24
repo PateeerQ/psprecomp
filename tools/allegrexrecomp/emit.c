@@ -549,7 +549,11 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
     case A_VMMUL:
         fprintf(f, "%spsp_vmmul(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
     case A_VTFM2: case A_VTFM3: case A_VTFM4:
-        fprintf(f, "%spsp_vtfm(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
+        /* The matrix side (2-4, from the opcode) goes in bits 4-6 next to the
+         * vector size: they differ for vhtfm. */
+        fprintf(f, "%spsp_vtfm(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt,
+                in->vsize | (unsigned)(in->op == A_VTFM2 ? 2 : in->op == A_VTFM3 ? 3 : 4) << 4);
+        return;
     case A_VMSCL:
         fprintf(f, "%spsp_vmscl(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
     case A_VMIDT:
