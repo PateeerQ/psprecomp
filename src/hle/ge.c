@@ -122,6 +122,7 @@
 #define GE_TPSM         0xC3
 #define GE_CLOAD        0xC4
 #define GE_CMODE        0xC5
+#define GE_TFLT         0xC6
 #define GE_TWRAP        0xC7
 #define GE_TFUNC        0xC9
 #define GE_TEC          0xCA
@@ -384,6 +385,8 @@ static void clip_to_screen(const float c[4], psp_vertex *out) {
     if (sy < -100000.0f) sy = -100000.0f; else if (sy > 100000.0f) sy = 100000.0f;
     out->x = (int)floorf(sx);
     out->y = (int)floorf(sy);
+    out->fx = sx;
+    out->fy = sy;
     out->z = c[2] * iw * g_xf.zscale + g_xf.zpos;
     out->w = iw;
 }
@@ -749,6 +752,8 @@ static void read_vertex(uint32_t addr, uint32_t vtype, const vlayout *L, cvertex
         out->v.u = uv[0]; out->v.v = uv[1];
         out->v.x = (int)pos[0];
         out->v.y = (int)pos[1];
+        out->v.fx = (float)out->v.x;
+        out->v.fy = (float)out->v.y;
         out->v.z = pos[2];
         out->v.w = 0;
         out->c[0] = out->c[1] = out->c[2] = 0; out->c[3] = 1;
@@ -1286,6 +1291,10 @@ static void run_list(ge_queue *q) {
             break;
         case GE_TMODE: g_ds.tex_swizzle = arg & 1; break;
         case GE_TPSM:  g_ds.tex_fmt = (int)(arg & 0xF); break;
+        case GE_TFLT:
+            g_ds.tex_min_linear = arg & 1;
+            g_ds.tex_mag_linear = (arg >> 8) & 1;
+            break;
         case GE_TWRAP:
             g_ds.tex_clamp_u = arg & 1;
             g_ds.tex_clamp_v = (arg >> 8) & 1;
