@@ -13,16 +13,29 @@ uint64_t   psp_mem_bad_access;
 /* Watch writes to one address. "Which code writes this word" is a question
  * that came up repeatedly and could only be answered by guessing; the write
  * path is the one place that can answer it directly. */
-static uint32_t g_wwatch;
-static int g_whits;
-void psp_mem_watch_write(uint32_t addr) { g_wwatch = addr; g_whits = 0; }
+static uint32_t g_wwatch, g_wwatch_val;
+static int g_whits, g_wwatch_has_val;
+void psp_mem_watch_write(uint32_t addr) { g_wwatch = addr; g_whits = 0; g_wwatch_has_val = 0; }
+/* Only the writes that leave `value` in the word at `addr`: for a slot written
+ * all the time (a stack frame), the one write that put a bad value there. */
+void psp_mem_watch_write_value(uint32_t addr, uint32_t value) {
+    g_wwatch = addr; g_wwatch_val = value; g_wwatch_has_val = 1; g_whits = 0;
+}
 int psp_mem_watch_hits(void) { return g_whits; }
 
+/* Called after the write, so a value watch sees the word as it now is. */
 static void note_write(uint32_t addr, uint32_t width) {
     if (!g_wwatch || addr + width <= g_wwatch || addr > g_wwatch) return;
+    if (g_wwatch_has_val) {
+        uint32_t now;
+        void *q = psp_mem_ptr(g_wwatch & ~3u, 4);
+        if (!q) return;
+        memcpy(&now, q, 4);
+        if (now != g_wwatch_val) return;
+    }
     if (g_whits++ < 8)
-        fprintf(stderr, "write%u to 0x%08X (watch 0x%08X) from fn 0x%08X\n",
-                width * 8, addr, g_wwatch, psp_trace_last());
+        fprintf(stderr, "write%u to 0x%08X (watch 0x%08X) from fn 0x%08X, ra 0x%08X sp 0x%08X\n",
+                width * 8, addr, g_wwatch, psp_trace_last(), psp_cpu.r[31], psp_cpu.r[29]);
 }
 
 /* Watch reads of one address: "which code looks at this" is the question when
@@ -118,8 +131,12 @@ void *psp_mem_ptr(uint32_t addr, uint32_t size) {
         if (off + size > PSP_RAM_SIZE) return NULL;   /* straddles the end */
         return psp_mem.ram + off;
     }
-    if (a >= PSP_VRAM_BASE && a < PSP_VRAM_BASE + PSP_VRAM_SIZE) {
-        uint32_t off = a - PSP_VRAM_BASE;
+    /* VRAM shows up four times, at 0x04000000, 0x04200000, 0x04400000 and
+     * 0x04600000 (the hardware uses the other views for the depth buffer's
+     * layouts). Plain mirrors here: MHFU's village reads through 0x04200000,
+     * and every read there used to fail as unmapped. */
+    if (a >= PSP_VRAM_BASE && a < PSP_VRAM_BASE + 4 * PSP_VRAM_SIZE) {
+        uint32_t off = (a - PSP_VRAM_BASE) & (PSP_VRAM_SIZE - 1);
         if (off + size > PSP_VRAM_SIZE) return NULL;
         return psp_mem.vram + off;
     }
@@ -150,8 +167,8 @@ float    psp_read_f32(uint32_t addr) { READ_BODY(float)  }
 #define WRITE_BODY(TYPE)                             \
     void *p = psp_mem_ptr(addr, (uint32_t)sizeof(TYPE)); \
     if (!p) { bad_access(addr, 1, (int)sizeof(TYPE)); return; }         \
-    note_write(addr, (uint32_t)sizeof(TYPE));                    \
-    memcpy(p, &val, sizeof(TYPE));
+    memcpy(p, &val, sizeof(TYPE));                               \
+    note_write(addr, (uint32_t)sizeof(TYPE));
 
 void psp_write8 (uint32_t addr, uint8_t  val) { WRITE_BODY(uint8_t)  }
 void psp_write16(uint32_t addr, uint16_t val) { WRITE_BODY(uint16_t) }
