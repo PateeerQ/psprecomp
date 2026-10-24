@@ -28,6 +28,9 @@ typedef struct {
     float    z, w;
     /* Fog factor, 1 = none, 0 = all fog colour (FOG1/FOG2 on view-space z). */
     float    fog;
+    /* x and y before rounding to pixels, for backends that rasterise with
+     * subpixel precision. */
+    float    fx, fy;
 } psp_vertex;
 
 /* GE primitive types, from the PRIM argument's type field. */
@@ -69,6 +72,8 @@ typedef struct {
     int      tex_alpha;      /* TFUNC bit 8: texture alpha is used */
     int      tex_double;     /* TFUNC bit 16: colour doubling */
     uint32_t tex_env;        /* TEC, for the blend function */
+    int      tex_min_linear; /* TFLT bit 0 (the software backend always samples nearest) */
+    int      tex_mag_linear; /* TFLT bit 8 */
 
     const uint8_t *clut;     /* bytes captured at the last CLOAD */
     int      clut_fmt;       /* CMODE bits 0-1 */
@@ -114,6 +119,10 @@ typedef struct {
 
     /* sceDisplaySetFrameBuf -- show what has accumulated. */
     void (*present)(void);
+
+    /* The last frame shown, 480x272 as 0xAABBGGRR, for backends whose pixels
+     * are not in guest memory. 0 on success; NULL or -1 means "read memory". */
+    int  (*capture)(uint32_t *rgba);
 } psp_render_backend;
 
 /* Select a backend by name ("software", "null", ...). Returns 0 on success,
@@ -126,6 +135,26 @@ const psp_render_backend *psp_render_current(void);
 /* Backends provided by the runtime. */
 extern const psp_render_backend psp_render_software;
 extern const psp_render_backend psp_render_null;
+extern const psp_render_backend psp_render_gl;
+
+/* The OpenGL backend (src/render_gl.c): GL 3.3 core or GLES 3.0, on a render
+ * thread of its own. The host owns the window and the context; these are
+ * called on the render thread. */
+typedef struct {
+    void *user;
+    int   gles;                                     /* GLES 3.0 shaders */
+    int   (*init)(void *user);                      /* create the context, make it current; 0 = ok */
+    void *(*get_proc)(void *user, const char *name);
+    void  (*swap)(void *user);
+    void  (*size)(void *user, int *w, int *h);      /* the drawable, in pixels */
+} psp_gl_host;
+
+/* Start the render thread; `scale` is the internal resolution (1 = 480x272).
+ * 0 when the context works, after which psp_render_select("gl") uses it. */
+int  psp_render_gl_start(const psp_gl_host *host, int scale);
+/* An image drawn over the top-left corner of every frame (the host's FPS
+ * line), 0xAABBGGRR; NULL removes it. Any thread. */
+void psp_render_gl_overlay(const uint32_t *rgba, int w, int h);
 
 /* Pixels written by the active backend -- the proof of life during bring-up. */
 uint64_t psp_render_pixels(void);
