@@ -179,6 +179,13 @@ void psp_misc_reset(void);
 int  psp_exit_requested(void);
 void psp_ctrl_set(uint32_t buttons, uint8_t ax, uint8_t ay);
 uint64_t psp_audio_blocks(void);
+/* Where sceAudio output goes: every buffer the guest outputs, as `frames`
+ * frames of 16-bit PCM (interleaved when `stereo`), with the channel's left
+ * and right volume (0x8000 is full). None by default: the samples are counted
+ * and dropped. The pointer is into guest memory and only valid during the call. */
+typedef void (*psp_audio_sink_fn)(int ch, const int16_t *pcm, uint32_t frames,
+                                  int stereo, int vol_l, int vol_r);
+void psp_audio_set_sink(psp_audio_sink_fn fn);
 
 void psp_threadman_init(void);
 void psp_threadman_register(void);
