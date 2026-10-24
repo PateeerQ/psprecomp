@@ -347,12 +347,15 @@ static void test_threads(void) {
           (unsigned long long)psp_threadman_handovers(),
           (unsigned long long)psp_threadman_handover_expired());
 
-    /* A sleep with nothing to wake it still ends, one tick later. That is the
-     * approximation that keeps a `while (!flag) sleep();` poll alive: the
-     * faithful alternative is a thread that never returns, and a run that
-     * stops with no evidence in it. */
+#if PSPRECOMP_REAL_THREADS
+    /* A sleep lasts until a wakeup, as on hardware: returning after a tick
+     * let a game's worker run ahead of the thread that was to wake it. */
     call(DELAY, 1000, 0, 0, 0);
-    CHECK(g_sleeper_stage == 2, "a sleep nothing wakes returns after its tick");
+    CHECK(g_sleeper_stage == 1, "a sleep nothing wakes keeps sleeping (stage=%d)", g_sleeper_stage);
+    CHECK(call(WAKEUP, sid, 0, 0, 0) == 0, "wakeup succeeds");
+    CHECK(call(WAITEND, sid, 0, 0, 0) == 0, "and the woken sleeper reaches its end");
+#endif
+    CHECK(g_sleeper_stage == 2, "a woken sleep returns (inline: after its tick)");
 
     /* A wakeup is not lost when it arrives before the sleep: a producer that
      * wakes a worker it has not started waiting yet must not have to guess. */
@@ -705,7 +708,7 @@ static void test_sub_interrupts(void) {
     CHECK(psp_intr_enabled() == 0, "and starts disabled, as it does on hardware");
 
     /* Registered but not enabled: a wait must not deliver. */
-    call(psp_nid("sceKernelSleepThread"), 0, 0, 0, 0);
+    call(psp_nid("sceKernelDelayThread"), 0, 0, 0, 0);
     CHECK(g_handler_calls == 0 && psp_intr_deliveries() == 0,
           "a disabled handler is not called");
 
@@ -713,7 +716,7 @@ static void test_sub_interrupts(void) {
           "enable returns the previous state (0 = was disabled)");
     CHECK(psp_intr_enabled() == 1, "handler enabled");
 
-    call(psp_nid("sceKernelSleepThread"), 0, 0, 0, 0);
+    call(psp_nid("sceKernelDelayThread"), 0, 0, 0, 0);
     CHECK(g_handler_calls == 1 && psp_intr_deliveries() == 1,
           "the wait delivers one interrupt");
     CHECK(g_handler_sub == 2 && g_handler_arg == 0x1234,
@@ -721,10 +724,11 @@ static void test_sub_interrupts(void) {
     CHECK(psp_cpu.r[PSP_REG_A0] == 0 && psp_cpu.r[PSP_REG_A1] == 0,
           "the interrupted context's registers survive the handler");
 
-    /* A delay and a vblank wait are the other two delivery points. */
+    /* A vblank wait is another delivery point. (SleepThread is one too, but it
+     * lasts until a wakeup now, so these waits are delays.) */
     call(psp_nid("sceKernelDelayThread"), 0, 0, 0, 0);
     call(psp_nid("sceDisplayWaitVblank"), 0, 0, 0, 0);
-    CHECK(g_handler_calls == 3, "DelayThread and the vblank wait deliver too");
+    CHECK(g_handler_calls == 3, "a second delay and the vblank wait deliver too");
 
     /* Reentrancy: a handler that waits is serviced later, not recursively. */
     g_handler_calls = 0;
@@ -732,7 +736,7 @@ static void test_sub_interrupts(void) {
     psp_register(FN, fake_subintr_handler_that_waits);
     call(psp_nid("sceKernelRegisterSubIntrHandler"), 1, 2, FN, 0);
     call(psp_nid("sceKernelEnableSubIntr"), 1, 2, 0, 0);
-    call(psp_nid("sceKernelSleepThread"), 0, 0, 0, 0);
+    call(psp_nid("sceKernelDelayThread"), 0, 0, 0, 0);
     CHECK(g_handler_calls == 1, "a handler that waits does not re-enter delivery");
 
     /* A handler address that discovery never found is counted and named, not
@@ -740,7 +744,7 @@ static void test_sub_interrupts(void) {
     psp_intrman_reset();
     call(psp_nid("sceKernelRegisterSubIntrHandler"), 1, 2, 0x0000BEEFu, 0);
     call(psp_nid("sceKernelEnableSubIntr"), 1, 2, 0, 0);
-    call(psp_nid("sceKernelSleepThread"), 0, 0, 0, 0);
+    call(psp_nid("sceKernelDelayThread"), 0, 0, 0, 0);
     CHECK(psp_intr_unresolved() == 1 && psp_intr_deliveries() == 0,
           "an unrecompiled handler address is counted as unresolved");
 
@@ -752,7 +756,7 @@ static void test_sub_interrupts(void) {
     call(psp_nid("sceKernelEnableSubIntr"), 1, 2, 0, 0);
     CHECK(call(psp_nid("sceKernelReleaseSubIntrHandler"), 1, 2, 0, 0) == 0,
           "release");
-    call(psp_nid("sceKernelSleepThread"), 0, 0, 0, 0);
+    call(psp_nid("sceKernelDelayThread"), 0, 0, 0, 0);
     CHECK(g_handler_calls == 0 && psp_intr_handlers() == 0,
           "a released handler is not called");
 }
