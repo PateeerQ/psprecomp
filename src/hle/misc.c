@@ -231,6 +231,13 @@ static uint64_t host_now_us(void) {
     return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
 }
 static uint64_t g_audio_due_us[AUDIO_CHANNELS];
+/* How far ahead of real time a channel may queue before a blocking output
+ * waits. One buffer was not enough: on one cooperative CPU the audio thread
+ * can be held up for a whole game frame, and the host's output then ran dry
+ * -- MHFU's sound effects stuttered, a few gaps of 256-512 samples every ten
+ * seconds. 35 ms covers a 30 fps frame; more is heard as the sound lagging
+ * the picture. */
+#define AUDIO_LEAD_US 35000u
 #endif
 
 static void output_blocking(int panned) {
@@ -246,7 +253,8 @@ static void output_blocking(int panned) {
         uint64_t now = host_now_us();
         if (g_audio_due_us[ch] < now) g_audio_due_us[ch] = now;   /* underrun */
         g_audio_due_us[ch] += play_us;
-        while (host_now_us() + play_us < g_audio_due_us[ch]) psp_threadman_yield();
+        const uint64_t lead = play_us > AUDIO_LEAD_US ? play_us : AUDIO_LEAD_US;
+        while (host_now_us() + lead < g_audio_due_us[ch]) psp_threadman_yield();
     }
 #else
     psp_threadman_delay(play_us);
