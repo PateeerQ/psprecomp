@@ -36,9 +36,41 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #define MAX_SUBINTR 64
 #define INTR_LOG    8   /* how many problems to name before counting silently */
+
+/* VBLANK is a clock rather than an event: it comes 59.94 times a second
+ * whatever the guest does, and games count it to pace themselves. MHFU's frame
+ * loop waits for two (30 fps); delivered at every wait like the others, two
+ * came at once and the game ran twice as fast. So it is delivered once per
+ * vblank of real time that has passed, with a short backlog caught up. */
+#define PSP_VBLANK_INT     30
+#define VBLANK_PERIOD_NS   16683333ll       /* 1001/60 ms */
+#define VBLANK_CATCHUP     2
+
+static long long g_vblank_start_ns;
+static uint64_t  g_vblanks_done;
+
+static long long intr_now_ns(void) {
+    struct timespec ts;
+    timespec_get(&ts, TIME_UTC);
+    return (long long)ts.tv_sec * 1000000000ll + ts.tv_nsec;
+}
+
+/* How many vblanks to deliver now: 0, or 1 for each period that ended since
+ * the last delivery, up to the catch-up limit (older ones are dropped). */
+static int vblanks_due(void) {
+    const long long now = intr_now_ns();
+    if (!g_vblank_start_ns) { g_vblank_start_ns = now; g_vblanks_done = 0; }
+    const uint64_t passed = (uint64_t)((now - g_vblank_start_ns) / VBLANK_PERIOD_NS);
+    if (passed <= g_vblanks_done) return 0;
+    uint64_t n = passed - g_vblanks_done;
+    if (n > VBLANK_CATCHUP) n = VBLANK_CATCHUP;
+    g_vblanks_done = passed;
+    return (int)n;
+}
 
 typedef struct {
     int      intr;
@@ -66,6 +98,7 @@ void psp_intrman_reset(void) {
     g_unresolved = 0;
     g_unresolved_logged = 0;
     g_delivering = 0;
+    g_vblank_start_ns = 0;
 }
 
 static psp_subintr *find_subintr(int intr, int subintr) {
@@ -140,10 +173,10 @@ void psp_intr_tick(void) {
     psp_ge_deliver_pending();
     g_delivering = 1;
 
+    const int vblanks = vblanks_due();
     for (int i = 0; i < MAX_SUBINTR; i++) {
         psp_subintr *s = &g_sub[i];
         if (!s->used || !s->enabled) continue;
-
         if (!psp_lookup(s->handler)) {
             /* Worth naming loudly: the guest registered a handler we cannot
              * call, which means the address is not in the recompiled set and
@@ -160,14 +193,18 @@ void psp_intr_tick(void) {
             continue;
         }
 
-        psp_cpu_state saved = psp_cpu;
-        psp_cpu.r[PSP_REG_A0] = (uint32_t)s->subintr;   /* handler(subintr, arg) */
-        psp_cpu.r[PSP_REG_A1] = s->arg;
-        psp_cpu.r[PSP_REG_RA] = 0;
-        psp_call_from_host(s->handler);
-        psp_cpu = saved;
+        /* One delivery per tick; VBLANK once per vblank that came due. */
+        const int times = s->intr == PSP_VBLANK_INT ? vblanks : 1;
+        for (int k = 0; k < times; k++) {
+            psp_cpu_state saved = psp_cpu;
+            psp_cpu.r[PSP_REG_A0] = (uint32_t)s->subintr;   /* handler(subintr, arg) */
+            psp_cpu.r[PSP_REG_A1] = s->arg;
+            psp_cpu.r[PSP_REG_RA] = 0;
+            psp_call_from_host(s->handler);
+            psp_cpu = saved;
 
-        g_deliveries++;
+            g_deliveries++;
+        }
     }
 
     if (g_host_tick) g_host_tick();
