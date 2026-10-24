@@ -59,6 +59,21 @@ void psp_display_get(uint32_t *addr, uint32_t *stride, uint32_t *format) {
 int psp_display_capture(const char *path) {
     if (!g_fb_addr) return -1;
 
+    /* A GPU backend's pixels are not in guest memory: ask it. */
+    static uint32_t shot[PSP_SCREEN_W * PSP_SCREEN_H];
+    const psp_render_backend *be = psp_render_current();
+    if (be->capture && be->capture(shot) == 0) {
+        FILE *f = fopen(path, "wb");
+        if (!f) return -1;
+        fprintf(f, "P6\n%d %d\n255\n", PSP_SCREEN_W, PSP_SCREEN_H);
+        for (int i = 0; i < PSP_SCREEN_W * PSP_SCREEN_H; i++) {
+            uint8_t rgb[3] = { (uint8_t)shot[i], (uint8_t)(shot[i] >> 8), (uint8_t)(shot[i] >> 16) };
+            fwrite(rgb, 1, 3, f);
+        }
+        fclose(f);
+        return 0;
+    }
+
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
     fprintf(f, "P6\n%d %d\n255\n", PSP_SCREEN_W, PSP_SCREEN_H);
@@ -112,6 +127,7 @@ static void hle_SetFrameBuf(void) {
     g_fb_width  = psp_arg(1);
     g_fb_format = psp_arg(2);
     if (!g_fb_width) g_fb_width = 512;
+    psp_render_current()->present();
     psp_ret(SCE_KERNEL_ERROR_OK);
 }
 
