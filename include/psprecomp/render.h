@@ -26,6 +26,8 @@ typedef struct {
      * texturing. A w of 0 means "no perspective": through-mode vertices and
      * anything built without one interpolate affinely. */
     float    z, w;
+    /* Fog factor, 1 = none, 0 = all fog colour (FOG1/FOG2 on view-space z). */
+    float    fog;
 } psp_vertex;
 
 /* GE primitive types, from the PRIM argument's type field. */
@@ -89,6 +91,9 @@ typedef struct {
     int      zwrite;         /* !ZMSK */
     uint32_t zb_addr;        /* ZBP + ZBW high byte, in eDRAM */
     int      zb_stride;      /* ZBW */
+
+    int      fog;            /* FGE: mix with fog_color by the vertex fog factor */
+    uint32_t fog_color;      /* FCOL */
 } psp_draw_state;
 
 typedef struct {
