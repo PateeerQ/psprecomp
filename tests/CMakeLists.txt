@@ -39,7 +39,7 @@ set_tests_properties(hle scheduler PROPERTIES TIMEOUT 60)
 
 add_executable(test_thread_lifecycle test_thread_lifecycle.c)
 target_link_libraries(test_thread_lifecycle PRIVATE psprecomp allegrex_core)
-foreach(case delete pinned pending checkpoint0 checkpoint1 checkpoint2 checkpoint3 mask reset)
+foreach(case delete pinned pending checkpoint0 checkpoint1 checkpoint2 checkpoint3 mask reset regs)
     add_test(NAME thread_${case} COMMAND test_thread_lifecycle ${case})
     set_tests_properties(thread_${case} PROPERTIES TIMEOUT 60)
 endforeach()

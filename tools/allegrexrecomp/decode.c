@@ -239,6 +239,10 @@ static const a_opinfo OPINFO[A_OP_COUNT] = {
     [A_VMIDT]    = { "vmidt",    F_VD_VS },
     [A_VMZERO]   = { "vmzero",   F_VD_VS },
     [A_VMONE]    = { "vmone",    F_VD_VS },
+    [A_VOCP]     = { "vocp",     F_VD_VS },
+    [A_VFAD]     = { "vfad",     F_VD_VS },
+    [A_VAVG]     = { "vavg",     F_VD_VS },
+    [A_VSGN]     = { "vsgn",     F_VD_VS },
     [A_VPFXS]    = { "vpfxs",    F_UNKNOWN },
     [A_VPFXT]    = { "vpfxt",    F_UNKNOWN },
     [A_VPFXD]    = { "vpfxd",    F_UNKNOWN },
@@ -542,10 +546,11 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
         switch ((word >> 23) & 7) {
         case 0: op = A_VADD; break;
         case 1: op = A_VSUB; break;
-        /* vdiv is sub-opcode 4, not 7. An earlier revision had it at 7, which
-         * both mis-decoded two real instructions and left actual vdiv falling
-         * through as unknown. Corrected against the published encoding. */
-        case 4: op = A_VDIV; break;
+        /* vdiv is sub-opcode 7 (0x638...): PPSSPP's tableVFPU0 and binutils'
+         * allegrex opcode table agree. An earlier revision moved it to 4,
+         * which left every real vdiv in MHFU (42 of them) as an unknown
+         * word that trapped. */
+        case 7: op = A_VDIV; break;
         default: op = A_VFPU_UNKNOWN; break;
         }
         break;
@@ -645,8 +650,17 @@ int a_decode(uint32_t word, uint32_t addr, a_insn *out) {
         case 0x13: op = A_VF2ID; break;
         case 0x14: op = A_VI2F;  break;
         case 0x15: op = A_VCMOV; break;
-        /* VFPU7 (rs=1) and VFPU9 (rs=2) are the conversion and shuffle
-         * tables; mapped but not broken out yet. */
+        case 0x02:                                  /* VFPU9 */
+            switch (RT_F(word)) {
+            case 0x04: op = A_VOCP; break;
+            case 0x06: op = A_VFAD; break;
+            case 0x07: op = A_VAVG; break;
+            case 0x0A: op = A_VSGN; break;
+            default:   op = A_VFPU_UNKNOWN; break;
+            }
+            break;
+        /* VFPU7 (rs=1) is the conversion table; mapped but not broken out
+         * yet. */
         default:   op = A_VFPU_UNKNOWN; break;
         }
         break;

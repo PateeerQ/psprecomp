@@ -28,6 +28,7 @@ static void hle_CpuSuspendIntr(void) {
 static void hle_CpuResumeIntr(void) {
     psp_threadman_intr_resume(psp_arg(0));
     psp_ret(SCE_KERNEL_ERROR_OK);
+    psp_ge_deliver_pending();          /* a GE interrupt raised inside the bracket */
 }
 
 /* ---- UtilsForUser -------------------------------------------------------- */

@@ -9,13 +9,15 @@
  * game's.
  *
  * Per pixel, in order: clear mode short-circuits everything; otherwise vertex
- * colour, texture function, alpha test, blend, write. Depth, stencil, fog,
- * dithering, colour test and logic ops are not implemented.
+ * colour, texture function, alpha test, depth test, blend, write. Stencil,
+ * fog, dithering, colour test and logic ops are not implemented.
  */
 
 #include "psprecomp/render.h"
 #include "psprecomp/mem.h"
 
+#include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* ---- shared target state ------------------------------------------------- */
@@ -246,8 +248,46 @@ static uint32_t fb_read(uint32_t at) {
     return g_fb_fmt == 3 ? psp_read32(at) : psp_color_expand(psp_read16(at), g_fb_fmt);
 }
 
+/* The depth buffer is 16-bit, in eDRAM like the framebuffer. */
+static uint32_t z_at(const psp_draw_state *st, int x, int y) {
+    return st->zb_addr + (uint32_t)(y * st->zb_stride + x) * 2u;
+}
+
+static int depth_pass(int func, uint32_t z, uint32_t d) {
+    switch (func) {
+    case 0:  return 0;
+    case 1:  return 1;
+    case 2:  return z == d;
+    case 3:  return z != d;
+    case 4:  return z < d;
+    case 5:  return z <= d;
+    case 6:  return z > d;
+    default: return z >= d;
+    }
+}
+
+/* Depth counters for the report, and PSPRECOMP_NO_DEPTH=1 to switch the
+ * depth buffer off entirely when a scene goes missing. */
+static uint64_t g_z_tested, g_z_failed, g_z_cleared;
+static int g_no_depth = -1;
+static int no_depth(void) {
+    if (g_no_depth < 0) {
+        const char *e = getenv("PSPRECOMP_NO_DEPTH");
+        g_no_depth = e && *e && *e != '0';
+    }
+    return g_no_depth;
+}
+void psp_render_depth_stats(uint64_t *tested, uint64_t *failed, uint64_t *cleared) {
+    *tested = g_z_tested; *failed = g_z_failed; *cleared = g_z_cleared;
+}
+
+static uint32_t clamp_z(float z) {
+    return z <= 0.0f ? 0u : (z >= 65535.0f ? 65535u : (uint32_t)z);
+}
+
 /* One fragment through the pipeline. `c` is the interpolated vertex colour. */
-static void fragment(const psp_draw_state *st, int x, int y, uint32_t c, float u, float v) {
+static void fragment(const psp_draw_state *st, int x, int y, uint32_t c, float u, float v,
+                     float zf) {
     if (!g_fb_addr || !g_fb_stride) return;
     if (x < 0 || y < 0 || x >= 480 || y >= 272) return;
     if (x < st->sc_x0 || x > st->sc_x1 || y < st->sc_y0 || y > st->sc_y1) return;
@@ -256,8 +296,12 @@ static void fragment(const psp_draw_state *st, int x, int y, uint32_t c, float u
     const uint32_t at = g_fb_addr + (uint32_t)(y * (int)g_fb_stride + x) * bytes;
 
     if (st->clear) {
-        /* Clear mode writes only the buffers its flags name; depth (bit 10)
-         * has no buffer here. A depth-only clear leaves the colour alone. */
+        /* Clear mode writes only the buffers its flags name. A depth-only
+         * clear leaves the colour alone. */
+        if (st->clear_depth && st->zb_stride && !no_depth()) {
+            psp_write16(z_at(st, x, y), (uint16_t)clamp_z(zf));
+            g_z_cleared++;
+        }
         if (!st->clear_color && !st->clear_alpha) return;
         if (!st->clear_color || !st->clear_alpha) {
             uint32_t d = fb_read(at);
@@ -272,6 +316,13 @@ static void fragment(const psp_draw_state *st, int x, int y, uint32_t c, float u
             c = tex_combine(st, psp_tex_fetch(st, tx, ty), c);
         }
         if (st->atest && !alpha_pass(st, c)) return;
+        /* Depth is written only while the test is on, as on hardware. */
+        if (st->ztest && st->zb_stride && !no_depth()) {
+            const uint32_t za = z_at(st, x, y), z = clamp_z(zf);
+            g_z_tested++;
+            if (!depth_pass(st->ztest_func, z, psp_read16(za))) { g_z_failed++; return; }
+            if (st->zwrite) psp_write16(za, (uint16_t)z);
+        }
         if (st->blend) c = blend(st, c, fb_read(at));
     }
 
@@ -280,8 +331,9 @@ static void fragment(const psp_draw_state *st, int x, int y, uint32_t c, float u
     g_pixels++;
 }
 
-static int edge(const psp_vertex *p, const psp_vertex *q, int x, int y) {
-    return (q->x - p->x) * (y - p->y) - (q->y - p->y) * (x - p->x);
+/* 64-bit: a vertex far off screen still has a well-defined edge. */
+static int64_t edge(const psp_vertex *p, const psp_vertex *q, int x, int y) {
+    return (int64_t)(q->x - p->x) * (y - p->y) - (int64_t)(q->y - p->y) * (x - p->x);
 }
 
 /* Barycentric fill with integer edge functions, so a shared edge belongs to
@@ -301,15 +353,18 @@ static void sw_tri(const psp_vertex *a, const psp_vertex *b, const psp_vertex *c
     if (maxx > 479) maxx = 479;
     if (maxy > 271) maxy = 271;
 
-    const int area = edge(a, b, c->x, c->y);
+    const int64_t area = edge(a, b, c->x, c->y);
     if (area == 0) return;
     const float inv = 1.0f / (float)area;
+    /* Perspective: interpolate u/w, v/w and 1/w, then divide. Only when all
+     * three vertices carry a 1/w; otherwise affine, as before. */
+    const int persp = a->w > 0 && b->w > 0 && c->w > 0;
 
     for (int y = miny; y <= maxy; y++) {
         for (int x = minx; x <= maxx; x++) {
-            int w0 = edge(a, b, x, y);   /* weight of c */
-            int w1 = edge(b, c, x, y);   /* weight of a */
-            int w2 = edge(c, a, x, y);   /* weight of b */
+            int64_t w0 = edge(a, b, x, y);   /* weight of c */
+            int64_t w1 = edge(b, c, x, y);   /* weight of a */
+            int64_t w2 = edge(c, a, x, y);   /* weight of b */
             if (!((w0 >= 0 && w1 >= 0 && w2 >= 0) || (w0 <= 0 && w1 <= 0 && w2 <= 0)))
                 continue;
             float la = (float)w1 * inv, lb = (float)w2 * inv, lc = (float)w0 * inv;
@@ -320,9 +375,16 @@ static void sw_tri(const psp_vertex *a, const psp_vertex *b, const psp_vertex *c
                            (int)(B(a->rgba) * la + B(b->rgba) * lb + B(c->rgba) * lc + 0.5f),
                            (int)(A(a->rgba) * la + A(b->rgba) * lb + A(c->rgba) * lc + 0.5f));
             }
-            fragment(st, x, y, col,
-                     a->u * la + b->u * lb + c->u * lc,
-                     a->v * la + b->v * lb + c->v * lc);
+            float u, v;
+            if (persp) {
+                const float q = a->w * la + b->w * lb + c->w * lc;
+                u = (a->u * a->w * la + b->u * b->w * lb + c->u * c->w * lc) / q;
+                v = (a->v * a->w * la + b->v * b->w * lb + c->v * c->w * lc) / q;
+            } else {
+                u = a->u * la + b->u * lb + c->u * lc;
+                v = a->v * la + b->v * lb + c->v * lc;
+            }
+            fragment(st, x, y, col, u, v, a->z * la + b->z * lb + c->z * lc);
         }
     }
 }
@@ -340,7 +402,7 @@ static void sw_sprite(const psp_vertex *a, const psp_vertex *b, const psp_draw_s
     for (int y = y0; y < y1; y++)
         for (int x = x0; x < x1; x++)
             fragment(st, x, y, b->rgba, a->u + (float)(x - a->x) * du,
-                     a->v + (float)(y - a->y) * dv);
+                     a->v + (float)(y - a->y) * dv, b->z);
 }
 
 static void sw_draw(int prim, const psp_vertex *v, int count, const psp_draw_state *st) {

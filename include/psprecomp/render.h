@@ -22,6 +22,10 @@ typedef struct {
     int      x, y;
     uint32_t rgba;
     float    u, v;
+    /* Depth after the viewport (0-65535), and 1/w for perspective-correct
+     * texturing. A w of 0 means "no perspective": through-mode vertices and
+     * anything built without one interpolate affinely. */
+    float    z, w;
 } psp_vertex;
 
 /* GE primitive types, from the PRIM argument's type field. */
@@ -78,6 +82,13 @@ typedef struct {
     int      atest_func, atest_ref, atest_mask; /* ATST */
 
     int      sc_x0, sc_y0, sc_x1, sc_y1;        /* SCISSOR1/2, inclusive */
+
+    int      clear_depth;    /* CLEAR bit 10: ...to the vertex depth */
+    int      ztest;          /* ZTE */
+    int      ztest_func;     /* ZTST */
+    int      zwrite;         /* !ZMSK */
+    uint32_t zb_addr;        /* ZBP + ZBW high byte, in eDRAM */
+    int      zb_stride;      /* ZBW */
 } psp_draw_state;
 
 typedef struct {
@@ -113,6 +124,9 @@ extern const psp_render_backend psp_render_null;
 
 /* Pixels written by the active backend -- the proof of life during bring-up. */
 uint64_t psp_render_pixels(void);
+/* Fragments depth-tested, rejected by the test, and depth pixels cleared.
+ * PSPRECOMP_NO_DEPTH=1 disables the depth buffer. */
+void psp_render_depth_stats(uint64_t *tested, uint64_t *failed, uint64_t *cleared);
 void     psp_render_reset_pixels(void);
 
 /* One pixel in format 0-3 (565, 5551, 4444, 8888) as 0xAABBGGRR. The 16-bit

@@ -428,6 +428,32 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
         fprintf(f, "%spsp_vscl(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vt, in->vsize); return;
     case A_VCMP:
         fprintf(f, "%spsp_vcmp(%u, %u, %u, %u);\n", ind, in->vd & 0xF, in->vs, in->vt, in->vsize); return;
+    case A_VSGE: case A_VSLT: case A_VCRSP: case A_VCRS: case A_VDET: case A_VHDP: {
+        const char *fn = in->op == A_VSGE ? "vsge" : in->op == A_VSLT ? "vslt" :
+                         in->op == A_VCRSP ? "vcrsp" : in->op == A_VCRS ? "vcrs" :
+                         in->op == A_VDET ? "vdet" : "vhdp";
+        fprintf(f, "%spsp_%s(%u, %u, %u, %u);\n", ind, fn, in->vd, in->vs, in->vt, in->vsize);
+        return;
+    }
+    case A_VOCP: case A_VFAD: case A_VAVG: case A_VSGN: {
+        const char *fn = in->op == A_VOCP ? "vocp" : in->op == A_VFAD ? "vfad" :
+                         in->op == A_VAVG ? "vavg" : "vsgn";
+        fprintf(f, "%spsp_%s(%u, %u, %u);\n", ind, fn, in->vd, in->vs, in->vsize);
+        return;
+    }
+    case A_VCMOV:
+        fprintf(f, "%spsp_vcmov(%u, %u, %u, 0x%08Xu);\n", ind, in->vd, in->vs, in->vsize, in->raw);
+        return;
+    case A_VROT:
+        fprintf(f, "%spsp_vrot(%u, %u, %u, %u);\n", ind, in->vd, in->vs, in->vsize, (in->raw >> 16) & 31);
+        return;
+    /* mfv/mtv: the low 8 bits name the register; 128 and up are the control
+     * registers (mfvc/mtvc). */
+    case A_MFV:
+        if (DEST_ZERO(in->rt)) break;
+        fprintf(f, "%s%s = psp_mfv(%u);\n", ind, rt, in->raw & 0xFF); return;
+    case A_MTV:
+        fprintf(f, "%spsp_mtv(%u, %s);\n", ind, in->raw & 0xFF, rt); return;
 
     /* Prefixes gate the arithmetic above: with one pending, the next vector op
      * traps instead of computing the unprefixed answer. Emitting these is what
@@ -437,7 +463,7 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
     case A_VMOV: case A_VABS: case A_VNEG: case A_VZERO: case A_VONE:
     case A_VRCP: case A_VRSQ: case A_VSQRT: case A_VSIN: case A_VCOS:
     case A_VEXP2: case A_VLOG2: case A_VSAT0: case A_VSAT1:
-    case A_VNRCP: case A_VNSIN: case A_VASIN: {
+    case A_VNRCP: case A_VNSIN: case A_VASIN: case A_VREXP2: {
         static const struct { a_op op; const char *sel; } U[] = {
             { A_VMOV, "PSP_VU_MOV" },   { A_VABS, "PSP_VU_ABS" },
             { A_VNEG, "PSP_VU_NEG" },   { A_VZERO,"PSP_VU_ZERO" },
@@ -447,7 +473,7 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
             { A_VEXP2,"PSP_VU_EXP2" },  { A_VLOG2,"PSP_VU_LOG2" },
             { A_VSAT0,"PSP_VU_SAT0" },  { A_VSAT1,"PSP_VU_SAT1" },
             { A_VNRCP,"PSP_VU_NRCP" },  { A_VNSIN,"PSP_VU_NSIN" },
-            { A_VASIN,"PSP_VU_ASIN" },
+            { A_VASIN,"PSP_VU_ASIN" },  { A_VREXP2,"PSP_VU_REXP2" },
         };
         for (size_t k = 0; k < sizeof U / sizeof U[0]; k++) {
             if (U[k].op != in->op) continue;
@@ -495,8 +521,14 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
         if (isnan(v))      fprintf(f, "%spsp_vimm(%u, NAN);\n", ind, in->vd);
         else if (isinf(v)) fprintf(f, "%spsp_vimm(%u, %sINFINITY);\n",
                                    ind, in->vd, v < 0 ? "-" : "");
-        else               fprintf(f, "%spsp_vimm(%u, %.9gf);\n",
-                                   ind, in->vd, (double)v);
+        else {
+            /* %g drops the point from whole numbers ("-1"), and "-1f" is not
+             * a C literal: put the ".0" back before the suffix. */
+            char num[32];
+            snprintf(num, sizeof num, "%.9g", (double)v);
+            if (!strpbrk(num, ".e")) strcat(num, ".0");
+            fprintf(f, "%spsp_vimm(%u, %sf);\n", ind, in->vd, num);
+        }
         return;
     }
 
@@ -555,6 +587,12 @@ static void branch_cond(char *buf, size_t n, const a_insn *in) {
     case A_BGEZAL: case A_BGEZALL: snprintf(buf, n, "(int32_t)%s >= 0", rs); break;
     case A_BC1T: case A_BC1TL: snprintf(buf, n, "psp_fpu_cond()"); break;
     case A_BC1F: case A_BC1FL: snprintf(buf, n, "!psp_fpu_cond()"); break;
+    /* VFPU condition branches test one bit of the vcmp result: lanes 0-3,
+     * 4 = any, 5 = all. The bit index is the top three bits of the rt field. */
+    case A_BVT: case A_BVTL:
+        snprintf(buf, n, "((psp_cpu.vfpu_cc >> %u) & 1)", (in->raw >> 18) & 7); break;
+    case A_BVF: case A_BVFL:
+        snprintf(buf, n, "!((psp_cpu.vfpu_cc >> %u) & 1)", (in->raw >> 18) & 7); break;
     default:                   snprintf(buf, n, "0 /* unhandled branch */"); break;
     }
 }

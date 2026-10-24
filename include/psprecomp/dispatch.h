@@ -26,6 +26,9 @@ typedef void (*psp_fn_t)(void);
  * function it defines, from a single init routine. */
 void psp_register(uint32_t addr, psp_fn_t fn);
 void psp_register_label(uint32_t addr, psp_fn_t fn);
+/* Forget everything registered in [lo, hi): for overlays, code the game loads
+ * at run time over other code. Registering an address again restores it. */
+void psp_unregister_range(uint32_t lo, uint32_t hi);
 void psp_dispatch_set_budget(uint64_t calls, void (*on_exceeded)(void));
 uint64_t psp_dispatch_calls(void);
 

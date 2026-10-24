@@ -114,6 +114,7 @@ typedef struct {
     uint32_t priority;
     uint32_t stack_size;
     uint32_t stack_base;   /* low address of the allocation */
+    uint32_t gp;           /* the creator's $gp: the module's small-data base */
     uint32_t attr;
     uint32_t arglen;       /* sceKernelStartThread arguments, held for the host */
     uint32_t argp;
@@ -777,6 +778,42 @@ static uint32_t wait_loop(int (*ready)(void *), void *ctx, uint64_t timeout_us,
     }
 }
 
+/* Registers the firmware sets for a thread before its entry runs, beyond the
+ * arguments. $gp is the module's small-data base: a thread started with $gp = 0
+ * reads its globals from address 0. $k0 points at a zeroed block at the top of
+ * the thread's stack, where the firmware keeps per-thread data; newlib keeps
+ * its reent pointer at $k0+4 (_getmodreent), so without it libc start-up fails.
+ * $sp starts below that block. */
+#define THREAD_K0_SIZE 0x100u
+static uint32_t thread_k0(const psp_thread *t) {
+    return t->stack_base + t->stack_size - THREAD_K0_SIZE;
+}
+
+/* sceKernelStartThread copies the argument block onto the new thread's stack,
+ * just below the $k0 block, and the thread's $a1 points at the copy. Callers
+ * rely on that: they pass a pointer into their own stack frame, which is gone
+ * by the time the new thread runs. Returns the address to pass as $a1. */
+static uint32_t copy_thread_args(const psp_thread *t, uint32_t len, uint32_t src) {
+    if (!src || !len || len > t->stack_size / 2) return src;
+    uint32_t dst = (thread_k0(t) - len) & ~15u;
+    void *to = psp_mem_ptr(dst, len);
+    const void *from = psp_mem_ptr(src, len);
+    if (!to || !from) return src;
+    memmove(to, from, len);
+    return dst;
+}
+
+static void thread_entry_regs(const psp_thread *t) {
+    uint32_t k0 = thread_k0(t);
+    void *blk = psp_mem_ptr(k0, THREAD_K0_SIZE);
+    if (blk) memset(blk, 0, THREAD_K0_SIZE);
+    /* Below the copied arguments when there are any, else below $k0. */
+    uint32_t top = (t->argp > t->stack_base && t->argp < k0) ? t->argp : k0;
+    psp_cpu.r[PSP_REG_K0] = k0;
+    psp_cpu.r[PSP_REG_GP] = t->gp;
+    psp_cpu.r[PSP_REG_SP] = (top - 64) & ~15u;
+}
+
 #if PSPRECOMP_REAL_THREADS
 static void *guest_thread_main(void *arg) {
     psp_thread *t = (psp_thread *)arg;
@@ -791,9 +828,7 @@ static void *guest_thread_main(void *arg) {
     psp_cpu_reset();
     psp_cpu.r[PSP_REG_A0] = t->arglen;
     psp_cpu.r[PSP_REG_A1] = t->argp;
-    /* Stack pointer starts at the top of the allocation, 16-byte aligned, with
-     * a little headroom so a callee storing below $sp cannot run off the end. */
-    psp_cpu.r[PSP_REG_SP] = (t->stack_base + t->stack_size - 64) & ~15u;
+    thread_entry_regs(t);
     psp_cpu.r[PSP_REG_RA] = 0;
 
     t->state = TH_RUNNING;
@@ -886,6 +921,7 @@ static void hle_CreateThread(void) {
     if (!t->stack_base) { psp_ret(SCE_KERNEL_ERROR_NO_MEMORY); return; }
 
     t->uid = g_next_uid++;
+    t->gp = psp_cpu.r[PSP_REG_GP];
     t->state = TH_DORMANT;
     t->used = 1;
 
@@ -918,9 +954,11 @@ static void hle_StartThread(void) {
     int prev_intr = g_tls_intr_depth;
     g_tls_intr_depth = 0;
     g_current = g_tls_me = t;
-    psp_cpu.r[PSP_REG_A0] = psp_arg(1);
-    psp_cpu.r[PSP_REG_A1] = psp_arg(2);
-    psp_cpu.r[PSP_REG_SP] = (t->stack_base + t->stack_size - 64) & ~15u;
+    t->arglen = psp_arg(1);
+    t->argp   = copy_thread_args(t, psp_arg(1), psp_arg(2));
+    psp_cpu.r[PSP_REG_A0] = t->arglen;
+    psp_cpu.r[PSP_REG_A1] = t->argp;
+    thread_entry_regs(t);
     psp_cpu.r[PSP_REG_RA] = 0;
     t->state = TH_RUNNING;
     t->exited = t->terminated = t->delete_after = 0;
@@ -947,7 +985,7 @@ static void hle_StartThread(void) {
 #if PSPRECOMP_REAL_THREADS
 
     t->arglen = psp_arg(1);
-    t->argp   = psp_arg(2);
+    t->argp   = copy_thread_args(t, psp_arg(1), psp_arg(2));
     t->state  = TH_READY;
     /* Set before the host thread exists, so a park that happens between here and
      * the new thread's first acquisition hands the CPU over instead of racing
@@ -1553,16 +1591,20 @@ static int deliver_callbacks(void) {
             continue;
         }
 
+        /* All pending notifications are delivered at once, as on hardware:
+         * the handler is int (*)(int count, int arg, void *common). */
+        uint32_t count = (uint32_t)c->notify_count;
         uint32_t arg = c->notify_arg;
-        c->notify_count--;
+        c->notify_count = 0;
         c->notify_arg = 0;
 
         /* A real callback does not disturb what it interrupted, so the whole
          * register file is saved and restored around it -- the same contract as
          * an interrupt handler, and the same one a thread body gets on entry. */
         psp_cpu_state saved = psp_cpu;
-        psp_cpu.r[PSP_REG_A0] = c->arg;      /* what the guest passed at create time */
-        psp_cpu.r[PSP_REG_A1] = arg;         /* and what the notification carried */
+        psp_cpu.r[PSP_REG_A0] = count;       /* notifications since the last delivery */
+        psp_cpu.r[PSP_REG_A1] = arg;         /* what the last notification carried */
+        psp_cpu.r[PSP_REG_A2] = c->arg;      /* what the guest passed at create time */
         psp_cpu.r[PSP_REG_RA] = 0;
         psp_call_from_host(c->func);
         c->delivery_status = (int32_t)psp_cpu.r[PSP_REG_V0];
@@ -1620,6 +1662,14 @@ static void hle_NotifyCallback(void) {
     c->notify_arg = psp_arg(1);
     if (c->notify_count < 0x7FFFFFFF) c->notify_count++;
     psp_ret(SCE_KERNEL_ERROR_OK);
+}
+
+int psp_callback_notify(uint32_t uid, uint32_t arg) {
+    psp_callback *c = find_callback(uid);
+    if (!c) return -1;
+    c->notify_arg = arg;
+    if (c->notify_count < 0x7FFFFFFF) c->notify_count++;
+    return 0;
 }
 
 static void hle_CheckCallback(void) {

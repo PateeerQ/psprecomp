@@ -61,6 +61,44 @@ static void worker_entry(void) {
 #endif
 static void handler(void) { deliveries++; }
 
+/* What a thread's entry sees in $gp, $k0 and $sp. */
+static uint32_t seen_gp, seen_k0, seen_sp, seen_k0_word, seen_a0, seen_a1, seen_arg;
+static void regs_entry(void) {
+    seen_a0 = psp_cpu.r[PSP_REG_A0];
+    seen_a1 = psp_cpu.r[PSP_REG_A1];
+    seen_arg = seen_a1 ? psp_read32(seen_a1) : 0;
+    seen_gp = psp_cpu.r[PSP_REG_GP];
+    seen_k0 = psp_cpu.r[PSP_REG_K0];
+    seen_sp = psp_cpu.r[PSP_REG_SP];
+    seen_k0_word = psp_read32(seen_k0 + 4);
+    psp_write32(seen_k0 + 4, 0x12345678);   /* newlib's reent slot: must be writable */
+    psp_cpu.r[PSP_REG_V0] = 0;
+}
+
+/* A started thread inherits its creator's $gp (the module's small-data base)
+ * and gets a zeroed $k0 block at the top of its stack, with $sp below it. */
+static void test_regs(void) {
+    psp_register(ENTRY, regs_entry);
+    psp_cpu.r[PSP_REG_GP] = 0x089D3A80;
+    uint32_t id = create();
+    psp_cpu.r[PSP_REG_GP] = 0;   /* what matters is the value at create time */
+    /* The argument block lives in the caller's frame and is overwritten
+     * before the thread runs: the thread must see a copy. */
+    psp_write32(OUT + 0x100, 0xCAFEF00D);
+    REQUIRE(call("sceKernelStartThread", id, 4, OUT + 0x100, 0) == 0);
+    psp_write32(OUT + 0x100, 0xDEADDEAD);
+    REQUIRE(call("sceKernelWaitThreadEnd", id, OUT, 0, 0) == 0);
+    REQUIRE(seen_gp == 0x089D3A80);
+    REQUIRE(seen_k0 != 0 && (seen_k0 & 0xFF) == 0);
+    REQUIRE(seen_k0_word == 0);
+    REQUIRE(seen_sp < seen_k0 && (seen_sp & 15) == 0);
+    REQUIRE(seen_a0 == 4);
+    REQUIRE(seen_a1 != OUT + 0x100 && seen_a1 < seen_k0 && seen_a1 > seen_sp);
+    REQUIRE(seen_arg == 0xCAFEF00D);
+    REQUIRE(call("sceKernelDeleteThread", id, 0, 0, 0) == 0);
+    psp_threadman_reset();
+}
+
 /* WaitThreadEnd delivers ticks before testing readiness. Creating from that
  * tick must not reuse an ExitDelete record the waiter has not consumed yet. */
 static void reclaim_handler(void) {
@@ -179,6 +217,7 @@ int main(int argc, char **argv) {
         test_terminate(0);
     } else if (!strcmp(argv[1], "mask")) test_mask();
     else if (!strcmp(argv[1], "reset")) test_reset();
+    else if (!strcmp(argv[1], "regs")) test_regs();
     else REQUIRE(0);
     printf("thread lifecycle %s: passed (real_threads=%d)\n",
            argv[1], PSPRECOMP_REAL_THREADS);

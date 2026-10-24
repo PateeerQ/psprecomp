@@ -757,14 +757,15 @@ static void test_sub_interrupts(void) {
           "a released handler is not called");
 }
 
-/* A callback, as the guest sees one: it is called with two arguments, and it
- * must not disturb the thread it runs on. */
-static uint32_t g_cb_arg, g_cb_notify;
+/* A callback, as the guest sees one: it is called as (count, arg, common),
+ * and it must not disturb the thread it runs on. */
+static uint32_t g_cb_arg, g_cb_notify, g_cb_count;
 static int      g_cb_calls;
 static void fake_callback(void) {
     g_cb_calls++;
-    g_cb_arg    = psp_cpu.r[PSP_REG_A0];
+    g_cb_count  = psp_cpu.r[PSP_REG_A0];
     g_cb_notify = psp_cpu.r[PSP_REG_A1];
+    g_cb_arg    = psp_cpu.r[PSP_REG_A2];
     psp_cpu.r[PSP_REG_S3] = 0xDEAD;    /* a register the interrupted code owns */
     psp_cpu.r[PSP_REG_V0] = 0x42;      /* the delivery status the kernel keeps */
 }
@@ -818,8 +819,9 @@ static void test_callbacks(void) {
     psp_cpu.r[PSP_REG_S3] = 0x5A5A5A5A;
     CHECK(call(CHECK, 0, 0, 0, 0) == 1, "CheckCallback reports 1 when a callback ran");
     CHECK(g_cb_calls == 1, "the callback ran once, got %d", g_cb_calls);
-    CHECK(g_cb_arg == 0xAA, "first argument is the one CreateCallback was given, got 0x%X", g_cb_arg);
+    CHECK(g_cb_count == 1, "first argument is the notification count, got %u", g_cb_count);
     CHECK(g_cb_notify == 0x77, "second argument is the one the notification carried, got 0x%X", g_cb_notify);
+    CHECK(g_cb_arg == 0xAA, "third argument is the one CreateCallback was given, got 0x%X", g_cb_arg);
     CHECK(psp_cpu.r[PSP_REG_S3] == 0x5A5A5A5A, "a callback does not disturb the thread it runs on");
 
     /* One delivery per notification. */
@@ -886,6 +888,208 @@ static void test_callbacks(void) {
           (unsigned long long)psp_power_registered());
 }
 
+
+/* ---- the disc image ---------------------------------------------------------
+ *
+ * A minimal ISO 9660 image built here: the root directory (sector 18) holds
+ * DATA.BIN (sectors 20-21, 3000 bytes, byte i = i*7) and a directory USRDIR
+ * (sector 19) holding X.BIN (sector 22). Games stat a file for its start
+ * sector and then open sector ranges by number, so both paths must agree. */
+
+static void iso_dirrec(uint8_t *r, const char *name, uint32_t lbn, uint32_t size, int dir) {
+    size_t n = name[0] ? strlen(name) : 1;   /* "\0" is the "." record */
+    r[0] = (uint8_t)(33 + n + ((n & 1) ? 0 : 1));
+    for (int k = 0; k < 4; k++) {
+        r[2 + k] = (uint8_t)(lbn >> (8 * k));   r[9 - k]  = (uint8_t)(lbn >> (8 * k));
+        r[10 + k] = (uint8_t)(size >> (8 * k)); r[17 - k] = (uint8_t)(size >> (8 * k));
+    }
+    r[18] = 125; r[19] = 3; r[20] = 7;          /* 2025-03-07 */
+    r[25] = dir ? 2 : 0;
+    r[32] = (uint8_t)n;
+    memcpy(r + 33, name, n);
+}
+
+static int write_test_iso(const char *path) {
+    static uint8_t img[23 * 2048];
+    memset(img, 0, sizeof img);
+    uint8_t *pvd = img + 16 * 2048;
+    pvd[0] = 1; memcpy(pvd + 1, "CD001", 5); pvd[6] = 1;
+    iso_dirrec(pvd + 156, "\0", 18, 2048, 1);
+    img[17 * 2048] = 255; memcpy(img + 17 * 2048 + 1, "CD001", 5);
+
+    uint8_t *root = img + 18 * 2048, *p = root;
+    iso_dirrec(p, "\0", 18, 2048, 1); p += p[0];
+    iso_dirrec(p, "\1", 18, 2048, 1); p += p[0];
+    iso_dirrec(p, "DATA.BIN;1", 20, 3000, 0); p += p[0];
+    iso_dirrec(p, "USRDIR", 19, 2048, 1);
+    p = img + 19 * 2048;
+    iso_dirrec(p, "\0", 19, 2048, 1); p += p[0];
+    iso_dirrec(p, "\1", 18, 2048, 1); p += p[0];
+    iso_dirrec(p, "X.BIN;1", 22, 4, 0);
+    for (int i = 0; i < 3000; i++) img[20 * 2048 + i] = (uint8_t)(i * 7);
+    memcpy(img + 22 * 2048, "MHFU", 4);
+
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    fwrite(img, 1, sizeof img, f);
+    fclose(f);
+    return 0;
+}
+
+static void put_guest_str(uint32_t at, const char *s) {
+    for (size_t i = 0; i <= strlen(s); i++) psp_write8(at + (uint32_t)i, (uint8_t)s[i]);
+}
+
+static void test_disc_image(void) {
+    const char *iso = "test_disc_image.iso";
+    CHECK(write_test_iso(iso) == 0, "test image written");
+    CHECK(psp_io_set_disc_image(iso) == 0, "image accepted");
+
+    const uint32_t PATH = 0x08900000u, STAT = 0x08900200u, BUF = 0x08901000u;
+    const uint32_t OPEN = psp_nid("sceIoOpen"), READ = psp_nid("sceIoRead");
+    const uint32_t CLOSE = psp_nid("sceIoClose"), GETSTAT = psp_nid("sceIoGetstat");
+    const uint32_t LSEEK32 = psp_nid("sceIoLseek32"), IOCTL = psp_nid("sceIoIoctl");
+
+    /* The private words survive except the first: the kernel writes only that. */
+    for (uint32_t i = 0; i < 88; i += 4) psp_write32(STAT + i, 0xA5A5A5A5u);
+    put_guest_str(PATH, "disc0:/data.bin");
+    CHECK(call(GETSTAT, PATH, STAT, 0, 0) == 0, "getstat finds a file case-insensitively");
+    CHECK(psp_read32(STAT + 8) == 3000 && psp_read32(STAT + 12) == 0, "size, got %u", psp_read32(STAT + 8));
+    CHECK(psp_read32(STAT + 64) == 20, "st_private[0] is the start sector, got %u", psp_read32(STAT + 64));
+    CHECK(psp_read32(STAT + 68) == 0xA5A5A5A5u, "the other private words are untouched");
+    CHECK((psp_read32(STAT) & 0xF000) == 0x2000, "a regular file");
+
+    put_guest_str(PATH, "disc0:/USRDIR");
+    CHECK(call(GETSTAT, PATH, STAT, 0, 0) == 0 && (psp_read32(STAT) & 0xF000) == 0x1000,
+          "a directory stats as one");
+    put_guest_str(PATH, "disc0:/NOPE.BIN");
+    CHECK(call(GETSTAT, PATH, STAT, 0, 0) == 0x80010002, "a missing file is ENOENT");
+
+    /* A raw range starting one sector into DATA.BIN, as a game would build it. */
+    put_guest_str(PATH, "disc0:/sce_lbn0x15_size0x100");
+    uint32_t fd = call(OPEN, PATH, 1, 0, 0);
+    CHECK(fd >= 3 && fd < 0x80000000u, "sce_lbn open, got 0x%08X", fd);
+    CHECK(call(READ, fd, BUF, 0x1000, 0) == 0x100, "a read stops at the window's size");
+    CHECK(psp_read8(BUF) == (uint8_t)(2048 * 7) && psp_read8(BUF + 5) == (uint8_t)(2053 * 7),
+          "and returns the bytes at that sector");
+    CHECK(call(LSEEK32, fd, 0x10, 0, 0) == 0x10, "lseek32 within the window");
+    CHECK(call(READ, fd, BUF, 1, 0) == 1 && psp_read8(BUF) == (uint8_t)(2064 * 7), "read after seek");
+    CHECK(call(CLOSE, fd, 0, 0, 0) == 0, "close");
+
+    put_guest_str(PATH, "umd0:/USRDIR/X.BIN");
+    fd = call(OPEN, PATH, 1, 0, 0);
+    CHECK(fd >= 3 && fd < 0x80000000u, "a file in a subdirectory opens, got 0x%08X", fd);
+    psp_cpu.r[PSP_REG_T0] = BUF + 0x100; psp_cpu.r[PSP_REG_T1] = 4;   /* outdata, outlen */
+    CHECK(call(IOCTL, fd, 0x01020006, 0, 0) == 0 && psp_read32(BUF + 0x100) == 22,
+          "ioctl 0x01020006 gives the start sector");
+    CHECK(call(READ, fd, BUF, 64, 0) == 4 && psp_read32(BUF) == 0x5546484Du,
+          "and reads its contents (\"MHFU\")");
+    call(CLOSE, fd, 0, 0, 0);
+
+    psp_io_set_disc_image(NULL);
+    remove(iso);
+}
+
+/* ---- GE callbacks -------------------------------------------------------------
+ *
+ * The MHFU shape: clear a flag, enqueue a list with a callback id, spin until
+ * the finish handler sets the flag. The handler must run before the spin. */
+
+static uint32_t g_ge_fin_a0, g_ge_fin_a1;
+static int      g_ge_fin_calls, g_ge_sig_calls;
+static void fake_ge_finish(void) {
+    g_ge_fin_calls++;
+    g_ge_fin_a0 = psp_cpu.r[PSP_REG_A0];
+    g_ge_fin_a1 = psp_cpu.r[PSP_REG_A1];
+    psp_cpu.r[PSP_REG_A0] = 0xDEAD;          /* clobber: the caller must not see it */
+}
+static void fake_ge_signal(void) { g_ge_sig_calls++; }
+
+static void test_ge_callbacks(void) {
+    psp_ge_reset();
+    const uint32_t FIN = 0x0000B000u, SIG = 0x0000B100u;
+    const uint32_t DATA = 0x08902000u, LIST = 0x08903000u;
+    psp_register(FIN, fake_ge_finish);
+    psp_register(SIG, fake_ge_signal);
+
+    psp_write32(DATA + 0, SIG);  psp_write32(DATA + 4, 0x11);
+    psp_write32(DATA + 8, FIN);  psp_write32(DATA + 12, 0x22);
+    uint32_t cbid = call(psp_nid("sceGeSetCallback"), DATA, 0, 0, 0);
+    CHECK(cbid < 16, "SetCallback returns an id, got 0x%08X", cbid);
+
+    psp_write32(LIST + 0, 0x0E010007u);      /* SIGNAL, behaviour SUSPEND, data 7 */
+    psp_write32(LIST + 4, 0x0F000005u);      /* FINISH 5 */
+    psp_write32(LIST + 8, 0x0C000000u);      /* END */
+    g_ge_fin_calls = g_ge_sig_calls = 0;
+    call(psp_nid("sceGeListEnQueue"), LIST, 0, cbid, 0);
+    CHECK(g_ge_fin_calls == 1 && g_ge_sig_calls == 1, "EnQueue raised finish and signal (%d, %d)",
+          g_ge_fin_calls, g_ge_sig_calls);
+    CHECK(g_ge_fin_a0 == 5 && g_ge_fin_a1 == 0x22, "finish handler gets (data, finish_arg)");
+    CHECK(psp_cpu.r[PSP_REG_A0] == LIST, "the caller's registers survive the handler");
+
+    /* No callback id: nothing is raised. */
+    g_ge_fin_calls = 0;
+    call(psp_nid("sceGeListEnQueue"), LIST, 0, (uint32_t)-1, 0);
+    CHECK(g_ge_fin_calls == 0, "a list without a callback raises nothing");
+
+    /* Inside a CpuSuspendIntr bracket the interrupt waits for the resume. */
+    uint32_t cookie = call(psp_nid("sceKernelCpuSuspendIntr"), 0, 0, 0, 0);
+    call(psp_nid("sceGeListEnQueue"), LIST, 0, cbid, 0);
+    CHECK(g_ge_fin_calls == 0, "not delivered while interrupts are off");
+    call(psp_nid("sceKernelCpuResumeIntr"), cookie, 0, 0, 0);
+    CHECK(g_ge_fin_calls == 1, "delivered at CpuResumeIntr");
+
+    CHECK(call(psp_nid("sceGeUnsetCallback"), cbid, 0, 0, 0) == 0, "unset");
+    psp_ge_reset();
+}
+
+/* ---- overlays: unregistering a range ------------------------------------------ */
+
+static void fake_ovl_a(void) {}
+static void fake_ovl_b(void) {}
+
+static void test_unregister_range(void) {
+    const uint32_t LO = 0x09C19000u;
+    psp_register(LO + 0x100, fake_ovl_a);
+    psp_register_label(LO + 0x180, fake_ovl_a);
+    psp_register(0x08804000u, fake_ovl_b);               /* outside: must survive */
+    psp_unregister_range(LO, LO + 0x1000);
+    CHECK(psp_lookup(LO + 0x100) == NULL && psp_lookup(LO + 0x180) == NULL,
+          "functions and labels in the range are gone");
+    CHECK(psp_lookup(0x08804000u) == fake_ovl_b, "outside the range is untouched");
+    psp_register(LO + 0x100, fake_ovl_b);
+    psp_register_label(LO + 0x180, fake_ovl_b);
+    CHECK(psp_lookup(LO + 0x100) == fake_ovl_b && psp_lookup(LO + 0x180) == fake_ovl_b,
+          "registering again restores both kinds");
+    psp_unregister_range(LO, LO + 0x1000);
+    psp_unregister_range(0x08804000u, 0x08804004u);
+}
+
+/* ---- the host tick ------------------------------------------------------------ */
+
+static int g_host_ticks;
+static void count_host_tick(void) { g_host_ticks++; psp_intr_tick(); /* must not recurse */ }
+
+static void test_host_tick(void) {
+    g_host_ticks = 0;
+    psp_intr_set_host_tick(count_host_tick);
+    psp_intr_tick();
+    psp_intr_tick();
+    CHECK(g_host_ticks == 2, "host tick runs once per interrupt tick, not re-entered");
+    int cookie = psp_threadman_intr_suspend();
+    psp_intr_tick();
+    CHECK(g_host_ticks == 2, "host tick does not run with interrupts disabled");
+    psp_threadman_intr_resume((uint32_t)cookie);
+    psp_intr_set_host_tick(NULL);
+    psp_intr_tick();
+    CHECK(g_host_ticks == 2, "NULL removes it");
+
+    uint32_t a = 1, w = 1, f = 9;
+    psp_display_reset();
+    psp_display_get(&a, &w, &f);
+    CHECK(a == 0 && w == 512 && f == 3, "display_get reports the reset framebuffer");
+}
+
 int main(void) {
     CHECK(psp_mem_init() == 0, "memory init");
     psp_cpu_reset();
@@ -909,6 +1113,10 @@ int main(void) {
     test_unimplemented_logging();
     test_sub_interrupts();
     test_callbacks();
+    test_disc_image();
+    test_ge_callbacks();
+    test_unregister_range();
+    test_host_tick();
 
     psp_mem_free();
 

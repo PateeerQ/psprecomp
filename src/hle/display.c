@@ -46,6 +46,12 @@ void psp_display_init(void) { psp_display_reset(); }
 uint64_t psp_display_vblanks(void) { return g_vblank_count; }
 uint32_t psp_display_framebuffer(void) { return g_fb_addr; }
 
+void psp_display_get(uint32_t *addr, uint32_t *stride, uint32_t *format) {
+    if (addr)   *addr = g_fb_addr;
+    if (stride) *stride = g_fb_width;
+    if (format) *format = g_fb_format;
+}
+
 /* Write the current framebuffer as a binary PPM. Returns 0 on success, -1 if
  * no framebuffer has been set yet (which is itself worth knowing during
  * bring-up: the game never got as far as showing anything). */

@@ -519,6 +519,130 @@ static void test_framebuffer_is_vram_relative(void) {
               ram_probe, psp_read32(ram_probe));
 }
 
+/* ORIGIN makes later addresses relative to itself; CALL saves that offset and
+ * RET restores it. Model data uses this so its lists work wherever loaded. */
+static void test_origin_relative_call(void) {
+    psp_ge_reset();
+    clear_fb();
+    begin_list();
+    vertex(0, 10, 10, 0xFF00FF00u);
+    vertex(1, 20, 20, 0xFF00FF00u);
+    cmd(0x10, 0);                                  /* BASE 0: offset does it all */
+    const uint32_t origin = LIST + g_pc;
+    cmd(0x14, 0);                                  /* ORIGIN_ADDR */
+    cmd(0x0A, 0x400 - (origin - LIST));            /* CALL LIST+0x400, relative */
+    cmd(0x13, 0);                                  /* OFFSET_ADDR 0 */
+    cmd(0x10, (VERTS >> 8) & 0xFF0000);
+    end_list();
+    /* The sub-list: draw, return. */
+    uint32_t save = g_pc;
+    g_pc = 0x400;
+    cmd(0x04, (6u << 16) | 2);
+    cmd(0x0B, 0);                                  /* RET */
+    g_pc = save;
+    psp_ge_reset();
+    clear_fb();
+    call(0xAB49E76A, LIST, 0, 0, 0);
+    CHECK(pixel(15, 15) == 0xFF00FF00u, "ORIGIN-relative CALL reached the sub-list: 0x%08X", pixel(15, 15));
+}
+
+/* Indexed drawing, and the vertex pointer advancing past a non-indexed PRIM. */
+static void test_index_buffer_and_advance(void) {
+    psp_ge_reset();
+    clear_fb();
+    begin_list();
+    vertex(0, 10, 10, 0xFF0000FFu);
+    vertex(1, 20, 20, 0xFF0000FFu);
+    vertex(2, 30, 10, 0xFFFF0000u);
+    vertex(3, 40, 20, 0xFFFF0000u);
+    cmd(0x04, (6u << 16) | 2);                     /* sprite from 0,1 */
+    cmd(0x04, (6u << 16) | 2);                     /* no VADDR: from 2,3 */
+    psp_write8(VERTS + 0x800, 3);
+    psp_write8(VERTS + 0x801, 1);
+    psp_write8(VERTS + 0x802, 0);
+    psp_write8(VERTS + 0x803, 3);
+    cmd(0x01, VERTS & 0xFFFFFF);
+    cmd(0x02, (VERTS + 0x800) & 0xFFFFFF);         /* IADDR */
+    cmd(0x12, VTYPE_2D | (1u << 11));              /* 8-bit indices */
+    cmd(0x04, (6u << 16) | 2);                     /* vertices 3 and 1: (20,20)-(40,20), empty */
+    cmd(0x04, (6u << 16) | 2);                     /* index pointer moved on: 0 and 3 */
+    end_list();
+    CHECK(pixel(15, 15) != 0, "first sprite drawn");
+    CHECK(pixel(35, 15) != 0, "second sprite used the advanced vertex pointer: 0x%08X", pixel(35, 15));
+    CHECK(pixel(25, 15) == 0xFFFF0000u, "indexed sprite (vertex 0 to 3) took vertex 3's colour: 0x%08X", pixel(25, 15));
+}
+
+static void vertexz(int idx, int x, int y, int z, uint32_t rgba) {
+    vertex(idx, x, y, rgba);
+    psp_write16(VERTS + (uint32_t)idx * 12 + 8, (uint16_t)z);
+}
+
+/* Depth: a clear writes it, the test rejects what is behind, and ZMSK stops
+ * the write. */
+static void test_depth(void) {
+    psp_ge_reset();
+    clear_fb();
+    begin_list();
+    const uint32_t zb = 0x04088000u;
+    cmd(0x9E, zb & 0xFFFFFF);                       /* ZBP */
+    cmd(0x9F, 480);                                 /* ZBW */
+    vertexz(0, 0, 0, 10, 0);
+    vertexz(1, 100, 100, 10, 0);
+    cmd(0xD3, 1 | (1u << 10));                      /* CLEAR, depth only */
+    cmd(0x04, (6u << 16) | 2);
+    cmd(0xD3, 0);
+    cmd(0x23, 1);                                   /* ZTE */
+    cmd(0xDE, 7);                                   /* GEQUAL: bigger is nearer */
+    vertexz(2, 10, 10, 100, 0xFF0000FFu);
+    vertexz(3, 30, 30, 100, 0xFF0000FFu);
+    vertexz(4, 20, 20, 50, 0xFFFF0000u);
+    vertexz(5, 40, 40, 50, 0xFFFF0000u);
+    vertexz(6, 60, 60, 5, 0xFF00FF00u);
+    vertexz(7, 70, 70, 5, 0xFF00FF00u);
+    cmd(0x01, (VERTS + 2 * 12) & 0xFFFFFF);
+    cmd(0x04, (6u << 16) | 2);                      /* red, z 100 */
+    cmd(0x04, (6u << 16) | 2);                      /* blue, z 50: hidden where red is */
+    cmd(0x04, (6u << 16) | 2);                      /* green, z 5: behind the clear */
+    end_list();
+    CHECK(pixel(25, 25) == 0xFF0000FFu, "nearer red wins the overlap: 0x%08X", pixel(25, 25));
+    CHECK(pixel(35, 35) == 0xFFFF0000u, "blue drawn outside the overlap: 0x%08X", pixel(35, 35));
+    CHECK(pixel(65, 65) == 0, "green behind the cleared depth: 0x%08X", pixel(65, 65));
+    CHECK(psp_read16(zb + (25 * 480 + 25) * 2) == 100, "depth written: %u", psp_read16(zb + (25 * 480 + 25) * 2));
+}
+
+/* Skinning: one bone translating by 0.25 moves the quad like the world matrix
+ * in test_transformed_quad does. */
+static void test_skinning(void) {
+    psp_ge_reset();
+    clear_fb();
+    g_pc = 0;
+    cmd(0x10, (VERTS >> 8) & 0xFF0000);
+    cmd(0x9C, FB & 0xFFFFFF);
+    cmd(0x9D, ((FB >> 8) & 0xFF0000) | 480);
+    cmd(0x12, (7u << 2) | (3u << 7) | (1u << 9));   /* 8-bit weight x1, 8888, float xyz */
+    cmd(0x01, VERTS & 0xFFFFFF);
+    fcmd(0x42, 240.0f);  fcmd(0x43, -136.0f);
+    fcmd(0x45, 2048.0f); fcmd(0x46, 2048.0f);
+    cmd(0x4C, (2048 - 240) << 4);
+    cmd(0x4D, (2048 - 136) << 4);
+    cmd(0x2A, 0);                                   /* BOFS */
+    const float bone[12] = { 1, 0, 0,  0, 1, 0,  0, 0, 1,  0.25f, 0, 0 };
+    for (int k = 0; k < 12; k++) fcmd(0x2B, bone[k]);
+    const float xy[4][2] = { { -0.5f, 0.5f }, { 0.5f, 0.5f }, { -0.5f, -0.5f }, { 0.5f, -0.5f } };
+    for (int i = 0; i < 4; i++) {
+        uint32_t a = VERTS + (uint32_t)i * 20;      /* weight (1, pad 3) colour x y z */
+        psp_write32(a, 128);
+        psp_write32(a + 4, 0xFFFFFFFFu);
+        psp_write32(a + 8, fbits(xy[i][0]));
+        psp_write32(a + 12, fbits(xy[i][1]));
+        psp_write32(a + 16, 0);
+    }
+    cmd(0x04, (4u << 16) | 4);
+    end_list();
+    CHECK(pixel(175, 136) == 0, "bone moved the left edge past x=175: 0x%08X", pixel(175, 136));
+    CHECK(pixel(185, 136) == 0xFFFFFFFFu, "skinned quad drawn at x=185: 0x%08X", pixel(185, 136));
+}
+
 int main(void) {
     if (psp_mem_init() != 0) { printf("memory init failed\n"); return 1; }
     psp_cpu_reset();
@@ -537,6 +661,10 @@ int main(void) {
     test_alpha_test_and_blend();
     test_clear_mode_and_scissor();
     test_backend_selection();
+    test_origin_relative_call();
+    test_index_buffer_and_advance();
+    test_depth();
+    test_skinning();
 
     psp_mem_free();
     printf(failures ? "raster: %d failure(s)\n" : "raster: all tests passed\n", failures);

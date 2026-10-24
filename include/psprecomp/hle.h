@@ -141,6 +141,9 @@ void psp_display_reset(void);
 int      psp_display_capture(const char *path);
 uint64_t psp_display_vblanks(void);
 uint32_t psp_display_framebuffer(void);
+/* The framebuffer as last set: address, stride in pixels, pixel format
+ * (0 565, 1 5551, 2 4444, 3 8888). For a host that shows frames itself. */
+void     psp_display_get(uint32_t *addr, uint32_t *stride, uint32_t *format);
 
 void psp_ge_init(void);
 void psp_ge_register(void);
@@ -149,6 +152,11 @@ void psp_ge_dump_stats(FILE *out);
 uint64_t psp_ge_command_count(void);
 uint64_t psp_ge_vertex_count(void);
 uint64_t psp_ge_pixels(void);
+/* Run GE signal/finish callbacks raised by finished lists, if the current
+ * thread has interrupts enabled. Called after EnQueue, at CpuResumeIntr and at
+ * every wait point. */
+void     psp_ge_deliver_pending(void);
+uint64_t psp_ge_callbacks_run(void);
 
 void psp_sas_init(void);
 void psp_sas_register(void);
@@ -160,6 +168,9 @@ void psp_io_init(void);
 void psp_io_register(void);
 void psp_io_reset(void);
 void psp_io_set_root(const char *root);
+/* Serve disc0:/umd0: from an ISO 9660 image instead of <root>/disc, so files
+ * have real start sectors and sce_lbn raw opens work. 0 on success. */
+int  psp_io_set_disc_image(const char *iso_path);
 uint64_t psp_io_bytes_read(void);
 
 void psp_misc_init(void);
@@ -222,6 +233,10 @@ void     psp_threadman_dump(FILE *out);
  * that records a callback id (scePower's slots) has to ask first. */
 int psp_callback_valid(uint32_t uid);
 
+/* sceKernelNotifyCallback from the host side: queue `arg` for callback `uid`
+ * (delivered at that thread's next callback point). -1 if no such callback. */
+int psp_callback_notify(uint32_t uid, uint32_t arg);
+
 /* What delivery did, for a host's report: callbacks that ran, notifications
  * dropped because the target is not a recompiled function, and passes that hit
  * the per-tick ceiling. */
@@ -249,6 +264,11 @@ void psp_intrman_reset(void);
  * the vblank wait -- since with no timer there is nothing else to hook. Safe to
  * call from inside a handler: delivery does not re-enter. */
 void psp_intr_tick(void);
+/* A host function run at the end of every tick that delivers interrupts, with
+ * the same guard: interrupts enabled, and never re-entered. For hardware a
+ * game drives that the HLE does not model, such as timers with handlers.
+ * NULL removes it. */
+void psp_intr_set_host_tick(void (*fn)(void));
 
 /* 0 until a game registers a handler, and the first number worth looking at
  * when a wait never ends. */

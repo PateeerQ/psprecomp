@@ -2,10 +2,8 @@
  *
  * Two things get pinned here. The first is register addressing, because the
  * layout is what makes a matrix row and column alias correctly and everything
- * else is built on it. The second is that a pending prefix makes arithmetic
- * *trap* rather than compute: partial VFPU that ignores prefixes produces
- * silently wrong numbers, which is the one failure mode this project has spent
- * its whole life avoiding.
+ * else is built on it. The second is the prefixes: every op reads and writes
+ * through them, and a prefix that is ignored produces silently wrong numbers.
  */
 
 #include "psprecomp/vfpu.h"
@@ -160,36 +158,124 @@ static void test_arithmetic(void) {
     for (int i = 0; i < 4; i++) CHECK_F(out[i], a[i] + b[i], "vadd into its own source");
 }
 
-static void test_prefix_traps(void) {
+static void test_prefixes(void) {
     psp_vfpu_reset();
 
     const float a[4] = { 1.0f, 2.0f, 3.0f, 4.0f };
+    const float b[4] = { 10.0f, 20.0f, 30.0f, 40.0f };
     set_quad(0x00, a);
-    set_quad(0x04, a);
+    set_quad(0x04, b);
+    float out[4];
 
-    uint64_t before = psp_vfpu_trap_count();
-
-    /* With no prefix pending, arithmetic computes. */
-    psp_vadd(0x08, 0x00, 0x04, 4);
-    CHECK(psp_vfpu_trap_count() == before, "no prefix, no trap");
-
-    /* With one pending, it must trap instead of quietly ignoring it. */
-    psp_vfpu_set_prefix(0, 0x00000055);
+    /* S: swizzle wzyx (3,2,1,0), negate lane 1. */
+    psp_vfpu_set_prefix(0, 0x1B | (1u << 17));
     CHECK(psp_vfpu_prefix_pending(), "prefix registers as pending");
+    psp_vadd(0x08, 0x00, 0x04, 4);
+    CHECK(!psp_vfpu_prefix_pending(), "the prefix is consumed by the op");
+    get_quad(0x08, out);
+    CHECK_F(out[0], 14.0f, "swizzled lane 0");
+    CHECK_F(out[1], 17.0f, "swizzled, negated lane 1");
+    CHECK_F(out[3], 41.0f, "swizzled lane 3");
 
-    float before_out[4];
-    get_quad(0x0C, before_out);
-    psp_vadd(0x0C, 0x00, 0x04, 4);
+    /* T: constants 1/2 (swizzle 3), 3 (swizzle 0 + abs) in lanes 0 and 1. */
+    psp_vfpu_set_prefix(1, 0x03 | (1u << 9) | (1u << 12) | (1u << 13) | (0xE4 & 0xF0));
+    psp_vmul(0x08, 0x00, 0x04, 4);
+    get_quad(0x08, out);
+    CHECK_F(out[0], 0.5f, "constant 1/2");
+    CHECK_F(out[1], 6.0f, "constant 3 via abs");
+    CHECK_F(out[2], 90.0f, "unprefixed lane");
 
-    CHECK(psp_vfpu_trap_count() == before + 1,
-          "a pending prefix traps rather than computing");
-    CHECK(!psp_vfpu_prefix_pending(), "the prefix is consumed by the attempt");
+    /* D: saturate lane 0 to [0,1], mask lane 3. */
+    const float keep[4] = { 7, 7, 7, 7 };
+    set_quad(0x08, keep);
+    psp_vfpu_set_prefix(2, 1u | (1u << 11));
+    psp_vadd(0x08, 0x00, 0x04, 4);
+    get_quad(0x08, out);
+    CHECK_F(out[0], 1.0f, "saturated lane");
+    CHECK_F(out[1], 22.0f, "lane 1 unchanged by D");
+    CHECK_F(out[3], 7.0f, "masked lane not written");
 
-    float after_out[4];
-    get_quad(0x0C, after_out);
-    CHECK(memcmp(before_out, after_out, sizeof after_out) == 0,
-          "the trapped op wrote nothing -- silently wrong output is the one "
-          "outcome worse than an error");
+    /* No prefix: plain arithmetic, and no trap is ever counted. */
+    psp_vadd(0x08, 0x00, 0x04, 4);
+    get_quad(0x08, out);
+    CHECK_F(out[0], 11.0f, "no prefix after consumption");
+    CHECK(psp_vfpu_trap_count() == 0, "prefixed ops compute instead of trapping");
+}
+
+static void test_more_ops(void) {
+    psp_vfpu_reset();
+    float out[4];
+    const float x[4] = { 1, 0, 0, 0 }, y[4] = { 0, 1, 0, 0 };
+    set_quad(0x00, x);
+    set_quad(0x04, y);
+
+    psp_vcrsp(0x08, 0x00, 0x04, 3);                /* x cross y = z */
+    get_quad(0x08, out);
+    CHECK_F(out[0], 0.0f, "vcrsp x");
+    CHECK_F(out[2], 1.0f, "vcrsp z");
+
+    const float p[4] = { 3, 4, 0, 0 }, q[4] = { 1, 2, 0, 0 };
+    set_quad(0x00, p);
+    set_quad(0x04, q);
+    psp_vdet(0x08, 0x00, 0x04, 2);
+    get_quad(0x08, out);
+    CHECK_F(out[0], 2.0f, "vdet 3*2 - 4*1");
+
+    psp_vhdp(0x08, 0x00, 0x04, 3);                 /* 3*1 + 4*2 + q.z(0) */
+    get_quad(0x08, out);
+    CHECK_F(out[0], 11.0f, "vhdp");
+
+    psp_vsge(0x08, 0x00, 0x04, 4);
+    get_quad(0x08, out);
+    CHECK_F(out[0], 1.0f, "vsge 3 >= 1");
+    CHECK_F(out[2], 1.0f, "vsge 0 >= 0");
+    psp_vslt(0x08, 0x04, 0x00, 4);
+    get_quad(0x08, out);
+    CHECK_F(out[1], 1.0f, "vslt 2 < 4");
+    CHECK_F(out[2], 0.0f, "vslt 0 < 0");
+
+    const float v[4] = { -2, 0, 5, 1 };
+    set_quad(0x00, v);
+    psp_vsgn(0x08, 0x00, 4);
+    get_quad(0x08, out);
+    CHECK_F(out[0], -1.0f, "vsgn negative");
+    CHECK_F(out[1], 0.0f, "vsgn zero");
+    CHECK_F(out[2], 1.0f, "vsgn positive");
+    psp_vfad(0x08, 0x00, 4);
+    get_quad(0x08, out);
+    CHECK_F(out[0], 4.0f, "vfad");
+    psp_vavg(0x08, 0x00, 4);
+    get_quad(0x08, out);
+    CHECK_F(out[0], 1.0f, "vavg");
+    psp_vocp(0x08, 0x00, 4);
+    get_quad(0x08, out);
+    CHECK_F(out[2], -4.0f, "vocp 1 - 5");
+
+    /* vrot.q with cosine in lane 0, sine in lane 1, at a quarter turn/2. */
+    const float ang[4] = { 0.5f, 0, 0, 0 };
+    set_quad(0x00, ang);
+    psp_vrot(0x08, 0x00, 4, (1u << 2) | 0u);
+    get_quad(0x08, out);
+    CHECK_F(out[0], 0.70710678f, "vrot cosine lane");
+    CHECK_F(out[1], 0.70710678f, "vrot sine lane");
+    CHECK_F(out[2], 0.0f, "vrot other lane");
+
+    /* vcmov: copy where CC bit 0 is set (tf = 0 means "if true"), per lane. */
+    const float src[4] = { 9, 9, 9, 9 }, dst[4] = { 1, 1, 1, 1 };
+    set_quad(0x00, src);
+    set_quad(0x08, dst);
+    psp_cpu.vfpu_cc = 0x5;                          /* lanes 0 and 2 */
+    psp_vcmov(0x08, 0x00, 4, 6u << 16);
+    get_quad(0x08, out);
+    CHECK_F(out[0], 9.0f, "vcmov lane 0 copied");
+    CHECK_F(out[1], 1.0f, "vcmov lane 1 kept");
+    CHECK_F(out[2], 9.0f, "vcmov lane 2 copied");
+
+    /* mfv/mtv round-trip, and the CC control register. */
+    psp_mtv(0x00, 0x40490FDBu);
+    CHECK(psp_mfv(0x00) == 0x40490FDBu, "mtv/mfv keep the bits");
+    psp_mtv(131, 0x21);
+    CHECK(psp_cpu.vfpu_cc == 0x21 && psp_mfv(131) == 0x21, "mtvc/mfvc on CC");
 }
 
 static void test_compare(void) {
@@ -454,7 +540,8 @@ int main(void) {
     test_register_addressing();
     test_load_store();
     test_arithmetic();
-    test_prefix_traps();
+    test_prefixes();
+    test_more_ops();
     test_compare();
     test_matrix_ops();
     test_matrix_transform();

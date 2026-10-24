@@ -54,6 +54,9 @@ static uint64_t   g_deliveries;
 static uint64_t   g_unresolved;
 static int        g_unresolved_logged;
 static int        g_delivering;   /* reentrancy guard: see psp_intr_tick */
+static void     (*g_host_tick)(void);
+
+void psp_intr_set_host_tick(void (*fn)(void)) { g_host_tick = fn; }
 
 void psp_intrman_init(void) { psp_intrman_reset(); }
 
@@ -134,6 +137,7 @@ void psp_intr_tick(void) {
      * achieves anyway. */
     if (g_delivering) return;
     if (psp_threadman_intr_disabled()) return;
+    psp_ge_deliver_pending();
     g_delivering = 1;
 
     for (int i = 0; i < MAX_SUBINTR; i++) {
@@ -166,6 +170,7 @@ void psp_intr_tick(void) {
         g_deliveries++;
     }
 
+    if (g_host_tick) g_host_tick();
     g_delivering = 0;
 }
 

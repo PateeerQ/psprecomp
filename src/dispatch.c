@@ -78,13 +78,27 @@ void psp_register_label(uint32_t addr, psp_fn_t fn) {
     uint32_t m = g_cap - 1;
     uint32_t j = hash_addr(addr) & m;
     while (g_table[j].used) {
-        if (g_table[j].addr == addr) return;      /* already known: keep it */
+        if (g_table[j].addr == addr) {            /* already known: keep it */
+            if (!g_table[j].fn) g_table[j].fn = fn;   /* unless it was unregistered */
+            return;
+        }
         j = (j + 1) & m;
     }
     g_table[j].addr = addr;
     g_table[j].fn = fn;
     g_table[j].used = 1;
     g_count++;
+}
+
+/* Forget every function and label in [lo, hi). The slots stay in the table
+ * with no function -- a lookup there is a miss, and registering the address
+ * again fills it -- so the probe chains of other entries are not broken. For
+ * code a game loads at run time over other code (overlays). */
+void psp_unregister_range(uint32_t lo, uint32_t hi) {
+    if (!g_table) return;
+    for (uint32_t i = 0; i < g_cap; i++)
+        if (g_table[i].used && g_table[i].addr >= lo && g_table[i].addr < hi)
+            g_table[i].fn = NULL;
 }
 
 psp_fn_t psp_lookup(uint32_t addr) {

@@ -1007,6 +1007,7 @@ int main(void) {
         0xDFFF7C00u,   /* vfim v127, +Inf halfword       */
         0xDF96FC00u,   /* vfim v22,  -Inf halfword       */
         0xDF969B81u,   /* vfim v22,  -0.00366401672      */
+        0xDF81BC00u,   /* vfim v1,   -1.0 (whole number)  */
         0x03E00008u,   /* jr $ra                         */
         0x00000000u,
     };
@@ -1050,6 +1051,8 @@ int main(void) {
                         "a -Inf halfword keeps its sign");
         expect_contains(vsrc, "psp_vimm(22, -0.00366401672f);",
                         "a finite halfword is emitted as before");
+        expect_contains(vsrc, "psp_vimm(1, -1.0f);",
+                        "a whole-number halfword keeps its point (\"-1f\" is not C)");
         /* `%.9gf` glued the format's literal `f` onto printf's `nan` and `inf`
          * output, giving these two invalid tokens. Neither may come back. */
         CHECK(strstr(vsrc, "nanf") == NULL, "no invalid `nanf` token");

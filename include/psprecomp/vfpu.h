@@ -19,16 +19,12 @@
  * and vscl/vmul/vadd/vdot another 18%. Those, plus the compare/min/max family,
  * are implemented here and unit-tested.
  *
- * The **prefix** instructions are not. `vpfxs`/`vpfxt`/`vpfxd` do not compute
+ * The **prefix** instructions `vpfxs`/`vpfxt`/`vpfxd` do not compute
  * anything -- they set a register that rewrites the *operands of the next
- * instruction*, swizzling lanes, negating, forcing constants, masking writes.
- * An arithmetic op executed while a prefix is pending computes something
- * different from the same op without one.
- *
- * So a pending prefix makes the next arithmetic op **trap** rather than
- * compute. Implementing the arithmetic while ignoring the prefixes would be
- * worse than not implementing it at all: it would produce numbers that are
- * silently wrong instead of an error that says so. Loud beats plausible.
+ * instruction*, swizzling lanes, negating, forcing constants, saturating and
+ * masking writes. Every vector op reads its operands and writes its result
+ * through them (vfpu.c: vread/vwrite), following PPSSPP's interpreter.
+ * Matrix ops ignore and consume them.
  */
 #ifndef PSPRECOMP_VFPU_H
 #define PSPRECOMP_VFPU_H
@@ -37,6 +33,7 @@
 #include "mem.h"
 
 #include <stdint.h>
+#include <stdio.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -67,6 +64,28 @@ void psp_vscl(uint32_t vd, uint32_t vs, uint32_t vt, int size);
 
 /* Comparison, writing the VFPU condition codes. */
 void psp_vcmp(uint32_t cond, uint32_t vs, uint32_t vt, int size);
+void psp_vsge(uint32_t vd, uint32_t vs, uint32_t vt, int size);
+void psp_vslt(uint32_t vd, uint32_t vs, uint32_t vt, int size);
+
+/* Conditional move, cross products, determinant, homogeneous dot, rotation.
+ * vcmov takes the raw instruction word for its condition fields; vrot its
+ * 5-bit immediate (bits 16..20). */
+void psp_vcmov(uint32_t vd, uint32_t vs, int size, uint32_t raw);
+void psp_vcrsp(uint32_t vd, uint32_t vs, uint32_t vt, int size);
+void psp_vcrs(uint32_t vd, uint32_t vs, uint32_t vt, int size);
+void psp_vdet(uint32_t vd, uint32_t vs, uint32_t vt, int size);
+void psp_vhdp(uint32_t vd, uint32_t vs, uint32_t vt, int size);
+void psp_vrot(uint32_t vd, uint32_t vs, int size, uint32_t imm);
+
+/* VFPU9: sum, average, sign, 1 - x. */
+void psp_vfad(uint32_t vd, uint32_t vs, int size);
+void psp_vavg(uint32_t vd, uint32_t vs, int size);
+void psp_vsgn(uint32_t vd, uint32_t vs, int size);
+void psp_vocp(uint32_t vd, uint32_t vs, int size);
+
+/* mfv/mtv (and mfvc/mtvc for reg >= 128): one lane's bits to or from a GPR. */
+uint32_t psp_mfv(uint32_t reg);
+void     psp_mtv(uint32_t reg, uint32_t value);
 
 /* Unary element-wise ops (VFPU4). One entry point rather than eighteen, since
  * they differ only in the scalar function applied per lane. */
@@ -103,7 +122,7 @@ void psp_vtfm(uint32_t vd, uint32_t vs, uint32_t vt, int size);
 void psp_vmmul(uint32_t vd, uint32_t vs, uint32_t vt, int size);
 
 /* Prefix state. Set by vpfxs/vpfxt/vpfxd; consumed (and cleared) by the next
- * arithmetic instruction. While any is pending, arithmetic traps. */
+ * vector instruction. */
 void psp_vfpu_set_prefix(int which, uint32_t value);
 int  psp_vfpu_prefix_pending(void);
 void psp_vfpu_reset(void);
@@ -111,6 +130,10 @@ void psp_vfpu_reset(void);
 /* Reports an instruction the VFPU cannot yet execute, by address and name. */
 void psp_vfpu_unimplemented(uint32_t addr, const char *what);
 uint64_t psp_vfpu_trap_count(void);
+
+/* For a host's report: how often each newly implemented op ran and how many
+ * results were NaN or infinite. */
+void psp_vfpu_report(FILE *out);
 
 #ifdef __cplusplus
 }
