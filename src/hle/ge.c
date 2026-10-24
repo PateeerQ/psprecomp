@@ -520,7 +520,7 @@ void psp_ge_reset(void) {
 }
 
 static void ge_watch_init(void);
-void psp_ge_init(void) { psp_ge_reset(); ge_watch_init(); }
+void psp_ge_init(void) { psp_ge_reset(); ge_watch_init(); psp_render_trace_init(); }
 
 void psp_ge_dump_stats(FILE *out) {
     fprintf(out, "GE: %llu lists, %llu commands, %llu finishes\n",
@@ -937,6 +937,31 @@ static void dump_prim(uint32_t type, uint32_t count, const cvertex *v, uint32_t 
             g_ds.clear ? " CLEAR" : "", g_ds.blend ? " blend" : "", VT_THROUGH(g_ge.vtype) ? " through" : "",
             g_lt.enable ? " lit" : "", g_ds.ztest, g_ds.ztest_func, g_ds.zwrite,
             g_ds.tex_enable, g_ds.tex_addr, g_ds.tex_fmt, g_ds.tex_w, g_ds.tex_h, g_ds.tex_func, g_xf.uv_mode);
+    /* Each distinct texture once, decoded as the rasterizer sees it. */
+    static uint32_t seen[64];
+    static int nseen;
+    if (g_ds.tex_enable && nseen < 64) {
+        int have = 0;
+        for (int i = 0; i < nseen; i++) have |= seen[i] == g_ds.tex_addr;
+        if (!have) {
+            seen[nseen++] = g_ds.tex_addr;
+            char name[64];
+            snprintf(name, sizeof name, "ge_tex_%08X_f%d.ppm", g_ds.tex_addr, g_ds.tex_fmt);
+            FILE *tf = fopen(name, "wb");
+            if (tf) {
+                fprintf(tf, "P6\n%d %d\n255\n", g_ds.tex_w, g_ds.tex_h);
+                for (int y = 0; y < g_ds.tex_h; y++)
+                    for (int x = 0; x < g_ds.tex_w; x++) {
+                        const uint32_t c = psp_tex_fetch(&g_ds, x, y);
+                        fputc((int)(c & 0xFF), tf); fputc((int)((c >> 8) & 0xFF), tf); fputc((int)((c >> 16) & 0xFF), tf);
+                    }
+                fclose(tf);
+            }
+            fprintf(g_dump, "  texture 0x%08X fmt %d %dx%d bw %d swz %d clut fmt %d shift %d mask %02X start %d cbp 0x%08X -> %s\n",
+                    g_ds.tex_addr, g_ds.tex_fmt, g_ds.tex_w, g_ds.tex_h, g_ds.tex_bw, g_ds.tex_swizzle,
+                    g_ds.clut_fmt, g_ds.clut_shift, g_ds.clut_mask, g_ds.clut_start, g_cbp, name);
+        }
+    }
     for (uint32_t i = 0; i < n && i < 4; i++)
         fprintf(g_dump, "    v%u clip (%g %g %g %g) -> %d %d z %g w %g uv %g %g c %08X fog %g\n", i,
                 v[i].c[0], v[i].c[1], v[i].c[2], v[i].c[3], v[i].v.x, v[i].v.y, v[i].v.z, v[i].v.w,
@@ -968,6 +993,7 @@ static void draw_prim(uint32_t type, uint32_t count) {
         read_vertex(g_ge.vaddr + vertex_index(vtype, n) * (uint32_t)stride, vtype, &L, &v[n]);
         if (!in_front(&v[n])) behind = 1;
     }
+    psp_render_trace = dumping();
     if (dumping()) dump_prim(type, count, v, count);
 
     if (count && !behind) {
