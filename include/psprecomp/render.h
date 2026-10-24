@@ -143,4 +143,8 @@ uint32_t psp_color_expand(uint32_t px, int fmt);
 uint32_t psp_tex_fetch(const psp_draw_state *st, int x, int y);
 uint64_t psp_render_unsupported_texels(void);
 
+/* Pixel tracing (PSPRECOMP_TRACE_PIXEL=x,y), on while psp_render_trace is set. */
+extern int psp_render_trace;
+void psp_render_trace_init(void);
+
 #endif
