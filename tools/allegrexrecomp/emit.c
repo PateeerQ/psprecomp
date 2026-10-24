@@ -512,7 +512,10 @@ static void emit_simple(ectx *c, const a_insn *in, const char *ind) {
         fprintf(f, "%spsp_vidt(%u, %u);\n", ind, in->vd, in->vsize);
         return;
     case A_VCST:
-        fprintf(f, "%spsp_vcst(%u, %u, %u);\n", ind, in->vd, in->vs, in->vsize);
+        /* The index is bits 16-20 (PPSSPP: (op >> 16) & 0x1F), not the vs
+         * field. Reading vs gave constant 0 everywhere, so MHFU's camera
+         * scaled its angle by 0 and built a projection of cos/sin(0) = inf. */
+        fprintf(f, "%spsp_vcst(%u, %u, %u);\n", ind, in->vd, (in->raw >> 16) & 31u, in->vsize);
         return;
 
     /* Immediate loads: the value is in the instruction, not a register. */
@@ -810,7 +813,13 @@ static void emit_function(ectx *c, const a_func *fn) {
         a_decode(fetch(an, a), a, &in);
 
         if (c->is_label[i]) { note_label(c, a); fprintf(f, "L_%08X: PSP_MARK(0x%08Xu);\n", a, a); }
-        last_terminal = in.is_return || in.is_indirect ||
+        /* A call comes back, so it never ends the flow: a body whose last
+         * instruction is a `jalr` falls into whatever follows the return site.
+         * Counting `jalr` as terminal (it is indirect) dropped that fall-out --
+         * MHFU's 0x088C804C, a jump-table case ending in a virtual call, just
+         * returned, unwinding its function without its epilogue: $sp stayed 32
+         * low and the caller read a saved $ra out of the callee's frame. */
+        last_terminal = in.is_return || (in.is_indirect && !in.is_call) ||
                         (in.is_jump && !in.is_call);
         comment(c, &in);
 
