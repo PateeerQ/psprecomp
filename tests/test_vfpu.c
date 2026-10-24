@@ -383,9 +383,12 @@ static void test_matrix_transform(void) {
     psp_vfpu_reset();
     float m[4][4], v[4];
 
-    /* Transforming a basis vector must yield the corresponding matrix column.
-     * That is the property which distinguishes this convention from its
-     * transpose -- an identity test would pass either way. */
+    /* vtfm takes each output lane as the dot of a matrix column with the
+     * vector (PPSSPP's Int_Vtfm, whose ReadMatrix has this [col][row] order):
+     * the first operand transposed, like vmmul. So a basis vector picks the
+     * same lane out of every column. This property is what tells the
+     * convention from its transpose -- an identity test passes either way --
+     * and the transpose made MHFU's hunter walk mirrored from where it faced. */
     for (int c = 0; c < 4; c++)
         for (int r = 0; r < 4; r++) m[c][r] = (float)(c * 4 + r + 1);
     set_matrix(0x08, 4, m);
@@ -397,8 +400,22 @@ static void test_matrix_transform(void) {
 
         psp_vtfm(0x44, 0x08, 0x40, 4);
         psp_vfpu_regs(0x44, 4, d);
-        for (int r = 0; r < 4; r++)
-            CHECK_F(psp_cpu.v[d[r]], m[basis][r], "vtfm of a basis vector is that column");
+        for (int i = 0; i < 4; i++)
+            CHECK_F(psp_cpu.v[d[i]], m[i][basis], "vtfm of a basis vector is that lane of each column");
+    }
+
+    /* vhtfm4: a three-lane vector with a 1 appended, through a 4x4 matrix
+     * (side 4 in bits 4-6, vector size 3). */
+    {
+        int t[4], d[4];
+        psp_vfpu_regs(0x40, 3, t);
+        const float h[3] = { 2.0f, -1.0f, 0.5f };
+        for (int i = 0; i < 3; i++) psp_cpu.v[t[i]] = h[i];
+        psp_vtfm(0x44, 0x08, 0x40, 3 | 4 << 4);
+        psp_vfpu_regs(0x44, 4, d);
+        for (int i = 0; i < 4; i++)
+            CHECK_F(psp_cpu.v[d[i]], m[i][0] * h[0] + m[i][1] * h[1] + m[i][2] * h[2] + m[i][3],
+                    "vhtfm4 appends a 1 to the vector");
     }
 
     /* Multiplying by the identity must be a no-op, in both operand positions.
@@ -417,9 +434,8 @@ static void test_matrix_transform(void) {
         for (int r = 0; r < 4; r++) CHECK_F(out[c][r], m[c][r], "I * M == M");
 
     /* vmmul and vtfm must agree: transforming by a product is the same as
-     * transforming twice. This is the strongest check available without an
-     * external oracle -- it pins the two against each other, though it still
-     * cannot detect a consistent transpose of both. */
+     * transforming twice. Both use their first operand transposed, so with
+     * P = vmmul(E-form A, B) = AB, vtfm(P, x) = (AB)^T x = B^T (A^T x). */
     float a[4][4], b[4][4];
     for (int c = 0; c < 4; c++)
         for (int r = 0; r < 4; r++) {
@@ -446,13 +462,13 @@ static void test_matrix_transform(void) {
     psp_vfpu_regs(0x1C, 4, d);
     for (int i = 0; i < 4; i++) combined[i] = psp_cpu.v[d[i]];
 
-    /* A * (B * x) */
-    psp_vtfm(0x00, 0x10, 0x18, 4);        /* matrix 0 */
-    psp_vtfm(0x04, 0x08, 0x00, 4);        /* matrix 1 */
+    /* B^T (A^T x) */
+    psp_vtfm(0x00, 0x08, 0x18, 4);        /* matrix 0 = A^T x */
+    psp_vtfm(0x04, 0x10, 0x00, 4);        /* matrix 1 = B^T (A^T x) */
     psp_vfpu_regs(0x04, 4, d);
     for (int i = 0; i < 4; i++)
         CHECK_F(psp_cpu.v[d[i]], combined[i],
-                "vmmul and vtfm agree: (A*B)x == A(Bx)");
+                "vmmul and vtfm agree: (AB)^T x == B^T (A^T x)");
 }
 
 /* The conversions. Every row is a measurement from a PSP-3000, firmware 6.61
