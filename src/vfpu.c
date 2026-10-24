@@ -511,24 +511,38 @@ void psp_vmscl(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
  * columns are the transformed basis vectors, so transforming (1,0,0,0) yields
  * column 0. That property is what the test pins, and it is the one that
  * distinguishes this from its transpose. */
+/* vtfmN / vhtfmN: out[i] = dot(column i of the matrix, t), for each of the
+ * matrix's `side` columns -- PPSSPP's Int_Vtfm, whose ReadMatrix is the same
+ * [col][row] order as matrix_read. This used to sum over columns per row,
+ * which is the transposed matrix: a rotation by the opposite angle. MHFU
+ * turns its hunter's facing into a walking direction with it, so the hunter
+ * walked mirrored about a diagonal from where it faced.
+ *
+ * `size` is the vector size n, with the matrix side in bits 4-6 (the emitter
+ * puts it there; 0 means side = n, which is what code emitted before did).
+ * n < side is the homogeneous form: t gets a 1 after its last element. */
 void psp_vtfm(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
     vdone();     /* prefixes do not apply to matrix ops */
+    const int n = size & 7;
+    const int side = (size >> 4) & 7 ? (size >> 4) & 7 : n;
     float m[4][4];
     int d[4], t[4];
-    matrix_read(vs, size, m);
-    psp_vfpu_regs(vt, size, t);
-    psp_vfpu_regs(vd, size, d);
+    matrix_read(vs, side, m);
+    const int tn = n < side ? n : side;
+    psp_vfpu_regs(vt, tn, t);
+    psp_vfpu_regs(vd, side, d);
 
-    float in[4], out[4];
-    for (int i = 0; i < size; i++) in[i] = psp_cpu.v[t[i]];
-    for (int r = 0; r < size; r++) {
+    float in[4] = { 0, 0, 0, 0 }, out[4];
+    for (int k = 0; k < tn; k++) in[k] = psp_cpu.v[t[k]];
+    if (tn < side) in[side - 1] = 1.0f;
+    for (int i = 0; i < side; i++) {
         float sum = 0.0f;
-        for (int c = 0; c < size; c++) sum += m[c][r] * in[c];
-        out[r] = sum;
+        for (int k = 0; k < side; k++) sum += m[i][k] * in[k];
+        out[i] = sum;
     }
     /* vd may be one of the sources, so write only after the whole result is
      * computed. */
-    for (int r = 0; r < size; r++) psp_cpu.v[d[r]] = out[r];
+    for (int i = 0; i < side; i++) psp_cpu.v[d[i]] = out[i];
 }
 
 /* Matrix product: Md = Ms^T * Mt. The first operand is used transposed, which
@@ -690,19 +704,35 @@ void psp_vhdp(uint32_t vd, uint32_t vs, uint32_t vt, int size) {
 
 /* vrot: a rotation row from one angle (in quarter turns). imm bits 0-1 name
  * the cosine lane, 2-3 the sine lane (all lanes when they are equal), bit 4
- * negates the sine; other lanes are zero. */
+ * negates the sine; other lanes are zero.
+ *
+ * The hardware's quirks, as PPSSPP's interpreter has them from hardware
+ * tests: the S prefix reaches the sine only, and without its negate; the
+ * cosine is of the raw register; the D prefix skips the cosine lane; and when
+ * vd and vs are in the same matrix, the cosine is taken of whatever the row
+ * already put in vs's lane. */
 void psp_vrot(uint32_t vd, uint32_t vs, int size, uint32_t imm) {
     if (compat_new_op("vrot")) return;
-    float s[4];
-    vread(0, vs, 1, s);
-    const float a = s[0] * 1.5707963267948966f;
-    float sine = sinf(a), cosine = cosf(a);
+    int sr[4], dr[4];
+    psp_vfpu_regs(vs, 1, sr);
+    const float raw = psp_cpu.v[sr[0]];
+    float s[4] = { raw, 0, 0, 0 };
+    if (g_prefix_set[0]) apply_st(g_prefix[0] & ~0x000F0000u, s, 1);
+    const float q = 1.5707963267948966f;
+    float sine = sinf(s[0] * q);
+    const float cosine = cosf(raw * q);
     if (imm & 0x10) sine = -sine;
     const int sl = (int)(imm >> 2) & 3, cl = (int)imm & 3;
     float d[4] = { 0, 0, 0, 0 };
     if (sl == cl) for (int i = 0; i < 4; i++) d[i] = sine;
     else d[sl] = sine;
     d[cl] = cosine;
+    if (((vd >> 2) & 7) == ((vs >> 2) & 7)) {
+        const int n = psp_vfpu_regs(vd, size, dr);
+        for (int i = 0; i < n; i++)
+            if (dr[i] == sr[0]) { d[cl] = cosf(d[i] * q); break; }
+    }
+    if (g_prefix_set[2]) g_prefix[2] &= ~((3u << (cl * 2)) | (1u << (8 + cl)));
     diag("vrot", s, d);
     vwrite(vd, size, d);
 }
