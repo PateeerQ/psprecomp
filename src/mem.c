@@ -36,6 +36,12 @@ static void note_write(uint32_t addr, uint32_t width) {
     if (g_whits++ < 8)
         fprintf(stderr, "write%u to 0x%08X (watch 0x%08X) from fn 0x%08X, ra 0x%08X sp 0x%08X\n",
                 width * 8, addr, g_wwatch, psp_trace_last(), psp_cpu.r[31], psp_cpu.r[29]);
+    if (g_whits <= 2) {   /* TEMP */
+        uint32_t sp = psp_cpu.r[29], s5 = psp_cpu.r[21], obj = psp_read32(sp + 316);
+        fprintf(stderr, "  TEMP s5 %08X [s5] %08X %08X %08X %08X obj %08X [obj] %08X %08X %08X\n", s5,
+                psp_read32(s5), psp_read32(s5 + 4), psp_read32(s5 + 8), psp_read32(s5 + 12), obj,
+                psp_read32(obj), psp_read32(obj + 4), psp_read32(obj + 8));
+    }
 }
 
 /* Watch reads of one address: "which code looks at this" is the question when
