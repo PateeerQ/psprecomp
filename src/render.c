@@ -287,7 +287,7 @@ static uint32_t clamp_z(float z) {
 
 /* One fragment through the pipeline. `c` is the interpolated vertex colour. */
 static void fragment(const psp_draw_state *st, int x, int y, uint32_t c, float u, float v,
-                     float zf) {
+                     float zf, float fog) {
     if (!g_fb_addr || !g_fb_stride) return;
     if (x < 0 || y < 0 || x >= 480 || y >= 272) return;
     if (x < st->sc_x0 || x > st->sc_x1 || y < st->sc_y0 || y > st->sc_y1) return;
@@ -314,6 +314,12 @@ static void fragment(const psp_draw_state *st, int x, int y, uint32_t c, float u
             if (u < 0 && (float)tx != u) tx--;  /* floor, for negative wraps */
             if (v < 0 && (float)ty != v) ty--;
             c = tex_combine(st, psp_tex_fetch(st, tx, ty), c);
+        }
+        if (st->fog && fog < 1.0f) {
+            const float k = fog < 0.0f ? 0.0f : fog;
+            c = rgba((int)(R(st->fog_color) + (R(c) - (int)R(st->fog_color)) * k + 0.5f),
+                     (int)(G(st->fog_color) + (G(c) - (int)G(st->fog_color)) * k + 0.5f),
+                     (int)(B(st->fog_color) + (B(c) - (int)B(st->fog_color)) * k + 0.5f), (int)A(c));
         }
         if (st->atest && !alpha_pass(st, c)) return;
         /* Depth is written only while the test is on, as on hardware. */
@@ -384,7 +390,8 @@ static void sw_tri(const psp_vertex *a, const psp_vertex *b, const psp_vertex *c
                 u = a->u * la + b->u * lb + c->u * lc;
                 v = a->v * la + b->v * lb + c->v * lc;
             }
-            fragment(st, x, y, col, u, v, a->z * la + b->z * lb + c->z * lc);
+            fragment(st, x, y, col, u, v, a->z * la + b->z * lb + c->z * lc,
+                     a->fog * la + b->fog * lb + c->fog * lc);
         }
     }
 }
@@ -402,7 +409,7 @@ static void sw_sprite(const psp_vertex *a, const psp_vertex *b, const psp_draw_s
     for (int y = y0; y < y1; y++)
         for (int x = x0; x < x1; x++)
             fragment(st, x, y, b->rgba, a->u + (float)(x - a->x) * du,
-                     a->v + (float)(y - a->y) * dv, b->z);
+                     a->v + (float)(y - a->y) * dv, b->z, b->fog);
 }
 
 static void sw_draw(int prim, const psp_vertex *v, int count, const psp_draw_state *st) {
