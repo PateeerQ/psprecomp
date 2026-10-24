@@ -669,7 +669,10 @@ static void gl_present(void) {
     if (!g_started) return;
     uint32_t addr, stride, fmt;
     psp_display_get(&addr, &stride, &fmt);
-    addr = 0x04000000u | (addr & 0x001FFFFFu);
+    /* VRAM addresses fold their mirrors together; a framebuffer in main RAM
+     * (MHFU's movies show the decoder's output straight from RAM) is left as
+     * it is, and is never an FBO, so it is shown from memory. */
+    if ((addr & 0x0F000000u) == 0x04000000u) addr = 0x04000000u | (addr & 0x001FFFFFu);
     c_present *c = (c_present *)cmd_add(C_PRESENT, sizeof *c);
     gfb *f = fb_find(addr);
     if (f && f->drawn) {
