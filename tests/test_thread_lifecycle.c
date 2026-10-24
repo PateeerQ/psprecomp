@@ -178,6 +178,8 @@ static void test_mask(void) {
     call("sceKernelDelayThread", 1, 0, 0, 0);
     REQUIRE(deliveries == 0);
     psp_threadman_intr_resume((uint32_t)inner);
+    /* A sleep lasts until a wakeup; a pending one lets this sleep return. */
+    call("sceKernelWakeupThread", call("sceKernelGetThreadId", 0, 0, 0, 0), 0, 0, 0);
     call("sceKernelSleepThread", 0, 0, 0, 0);
     REQUIRE(deliveries == 0);
     psp_threadman_intr_resume((uint32_t)outer);
