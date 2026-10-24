@@ -776,6 +776,24 @@ static int cmd_emit(const char *path, const char *outdir, const char *prefix) {
         }
     }
 
+    /* Every stub in the import table gets a thunk, not only the ones this
+     * module calls. Code loaded later -- MHFU's overlays -- calls the EBOOT's
+     * stubs too, through the dispatch table, and a stub the EBOOT never calls
+     * itself had no thunk: the overlay ran the unpatched `jr ra; nop` and its
+     * sceKernelCreateThread, event flags and sceNetAdhoc calls did nothing. */
+    if (nimp > 0) {
+        uint32_t *all = (uint32_t *)realloc(an.imports,
+                                            (size_t)(an.nimports + nimp) * sizeof *all);
+        if (all) {
+            an.imports = all;
+            for (int i = 0; i < nimp; i++) {
+                int have = 0;
+                for (int k = 0; k < an.nimports && !have; k++) have = all[k] == imp[i].addr;
+                if (!have) all[an.nimports++] = imp[i].addr;
+            }
+        }
+    }
+
     emit_opts o;
     o.outdir = outdir;
     o.prefix = prefix ? prefix : "recomp";
