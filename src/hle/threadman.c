@@ -1039,6 +1039,16 @@ static void hle_TerminateThread(void) {
     psp_ret(SCE_KERNEL_ERROR_OK);
 }
 
+/* sceKernelTerminateDeleteThread: terminate, and free the thread once it is
+ * off the CPU (as ExitDeleteThread does for itself). MHFU's overlays use it
+ * to end their loader threads. */
+static void hle_TerminateDeleteThread(void) {
+    psp_thread *t = find_thread(psp_arg(0));
+    if (!t || t == g_current) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_THID); return; }
+    t->delete_after = 1;
+    hle_TerminateThread();
+}
+
 static void hle_DeleteThread(void) {
     psp_thread *t = find_thread(psp_arg(0));
     if (!t) { psp_ret(SCE_KERNEL_ERROR_ILLEGAL_THID); return; }
@@ -1085,19 +1095,22 @@ static void hle_DelayThread(void) {
 
 /* sceKernelSleepThread[CB]: park until sceKernelWakeupThread.
  *
- * Capped at a tick, and that cap is the difference between a game that
- * advances and one that stops: a sleep that nothing ever wakes, inside a
- * `while (!flag) sleep();` poll, is indistinguishable from a hang -- and a
- * hang produces no evidence at all. One tick per iteration means the other
- * threads get the CPU and any interrupt handler gets to run, so what the poll
- * is waiting for can still be produced. */
+ * It returns only once a wakeup has arrived (or was already pending), as on
+ * the PSP and in PPSSPP. It used to return after one tick regardless, so that
+ * a sleep nothing woke would not look like a hang; but code that sleeps
+ * between commands -- MHFU's Capcom sound driver threads -- then ran its loop
+ * at moments nothing had asked it to, and depending on timing the BGM never
+ * started and Character Select waited for it forever (about half the runs).
+ * The wait is still parked one tick at a time, delivering interrupts and
+ * VTimers in between, so everything the wakeup depends on keeps running. */
 static void hle_SleepThread(void) {
     psp_thread *t = g_tls_me;
-    int already_woken = t && t->wakeups > 0;
-
-    if (!already_woken) park_for(W_SLEEP, TICK_US);
-    if (t && t->wakeups) t->wakeups--;      /* consume it, pending or fresh */
-    deliver_tick();
+    if (!t) { deliver_tick(); psp_ret(SCE_KERNEL_ERROR_OK); return; }
+    while (t->wakeups == 0) {
+        park_for(W_SLEEP, TICK_US);
+        deliver_tick();
+    }
+    t->wakeups--;
     psp_ret(SCE_KERNEL_ERROR_OK);
 }
 
@@ -1694,6 +1707,7 @@ void psp_threadman_register(void) {
     psp_hle_register(0x809CE29B, "ThreadManForUser", "sceKernelExitDeleteThread",        hle_ExitDeleteThread);
     psp_hle_register(0x616403BA, "ThreadManForUser", "sceKernelTerminateThread",         hle_TerminateThread);
     psp_hle_register(0x9FA03CD3, "ThreadManForUser", "sceKernelDeleteThread",            hle_DeleteThread);
+    psp_hle_register(0x383F7BCC, "ThreadManForUser", "sceKernelTerminateDeleteThread",   hle_TerminateDeleteThread);
     psp_hle_register(0xCEADEB47, "ThreadManForUser", "sceKernelDelayThread",             hle_DelayThread);
     psp_hle_register(0x68DA9E36, "ThreadManForUser", "sceKernelDelayThreadCB",           hle_DelayThread);
     psp_hle_register(0x9ACE131E, "ThreadManForUser", "sceKernelSleepThread",             hle_SleepThread);
