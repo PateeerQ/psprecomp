@@ -490,7 +490,7 @@ const psp_render_backend *psp_render_current(void) { return g_backend; }
 
 int psp_render_select(const char *name) {
     static const psp_render_backend *const all[] = {
-        &psp_render_software, &psp_render_null
+        &psp_render_software, &psp_render_null, &psp_render_gl
     };
     if (!name) return -1;
     for (size_t i = 0; i < sizeof all / sizeof all[0]; i++) {
