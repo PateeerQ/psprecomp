@@ -30,6 +30,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* Display-list opcodes. Only the ones the walk needs to be correct about are
@@ -125,9 +126,70 @@ typedef struct {
     int      used;
     int      done;
     int32_t  cbid;      /* sceGeSetCallback id from EnQueue, -1 for none */
+    /* CALL stack: return address, offset and base per level. It belongs to
+     * the list, not to one run of it: a list that stalls inside a called
+     * sub-list resumes there later, and its RET must still find the way back.
+     * Kept local, a resumed list ignored that RET and ran on into whatever
+     * followed (MHFU's village: model data in VRAM, executed as commands). */
+    uint32_t stack[GE_STACK][3];
+    int      sp;
+    uint32_t prev;      /* the previous command word: END reads it (SIGNAL) */
+    uint32_t start;     /* where EnQueue pointed it, for diagnostics */
 } ge_queue;
 
 static ge_queue g_queue[MAX_QUEUES];
+
+/* Block transfer (TRXKICK): a rectangle of pixels copied from one buffer to
+ * another, the GE's own DMA. Registers as PPSSPP's GPUState.h. MHFU uploads
+ * model data into VRAM with it -- display lists included, which its lists
+ * then CALL; without it those were empty, and the GE ran a megabyte of zeros
+ * into whatever followed. */
+#define GE_TRXSBP   0xB2
+#define GE_TRXSBW   0xB3
+#define GE_TRXDBP   0xB4
+#define GE_TRXDBW   0xB5
+#define GE_TRXKICK  0xEA
+#define GE_TRXSPOS  0xEB
+#define GE_TRXDPOS  0xEC
+#define GE_TRXSIZE  0xEE
+static struct { uint32_t sbp, sbw, dbp, dbw, spos, dpos, size; } g_trx;
+static uint64_t g_trx_count, g_trx_bytes;
+
+static void trx_kick(uint32_t arg) {
+    const uint32_t src = (g_trx.sbp & 0xFFFFF0u) | ((g_trx.sbw & 0xFF0000u) << 8);
+    const uint32_t dst = (g_trx.dbp & 0xFFFFF0u) | ((g_trx.dbw & 0xFF0000u) << 8);
+    uint32_t sstride = g_trx.sbw & 0x7F8u, dstride = g_trx.dbw & 0x7F8u;
+    if (sstride > 0x400) sstride = 0;
+    if (dstride > 0x400) dstride = 0;
+    const uint32_t sx = g_trx.spos & 0x3FF, sy = (g_trx.spos >> 10) & 0x3FF;
+    const uint32_t dx = g_trx.dpos & 0x3FF, dy = (g_trx.dpos >> 10) & 0x3FF;
+    const uint32_t w = (g_trx.size & 0x3FF) + 1, h = ((g_trx.size >> 10) & 0x3FF) + 1;
+    const uint32_t bpp = (arg & 1) ? 4 : 2;
+    g_trx_count++;
+    for (uint32_t y = 0; y < h; y++) {
+        const uint32_t from = src + ((sy + y) * sstride + sx) * bpp;
+        const uint32_t to   = dst + ((dy + y) * dstride + dx) * bpp;
+        const void *s = psp_mem_ptr(from, w * bpp);
+        void *d = psp_mem_ptr(to, w * bpp);
+        if (!s || !d) break;
+        memmove(d, s, w * bpp);
+        g_trx_bytes += w * bpp;
+    }
+}
+
+/* The last control transfers of the lists, printed when one jumps into
+ * nothing: how it got there is the question, not where it ended. */
+static struct { uint32_t from, to; char kind; } g_flow[16];
+static int g_nflow;
+static FILE *g_dump;
+static int dumping(void);
+static void flow(uint32_t from, uint32_t to, char kind) {
+    if (g_dump && dumping()) fprintf(g_dump, "  flow %c 0x%08X -> 0x%08X\n", kind, from, to);
+    g_flow[g_nflow % 16].from = from;
+    g_flow[g_nflow % 16].to = to;
+    g_flow[g_nflow % 16].kind = kind;
+    g_nflow++;
+}
 static uint32_t g_base;     /* BASE is GE state, not per list */
 static uint32_t g_next_id;
 
@@ -308,6 +370,8 @@ void psp_ge_dump_stats(FILE *out) {
             (unsigned long long)g_ge.lists,
             (unsigned long long)g_ge.commands,
             (unsigned long long)g_ge.finishes);
+    fprintf(out, "    block transfers %llu, %llu bytes\n",
+            (unsigned long long)g_trx_count, (unsigned long long)g_trx_bytes);
     fprintf(out, "    framebuffer 0x%08X stride %u, vertex type 0x%06X\n",
             g_ge.fbp, g_ge.fbw, g_ge.vtype);
     fprintf(out, "    vertices submitted: %llu\n", (unsigned long long)g_ge.vertices);
@@ -539,6 +603,70 @@ static uint32_t vertex_index(uint32_t vtype, uint32_t i) {
     }
 }
 
+/* PSPRECOMP_GE_DUMP=N[,K]: describe every primitive of lists N..N+K-1 (K
+ * defaults to 4), with the matrices once per list. "The scene comes out as a
+ * few huge triangles" is a question about specific vertices, and this is how
+ * to see them. */
+static FILE *g_dump;
+static uint32_t g_cmd_at[256];     /* where each command was last read from */
+static uint64_t g_dump_from, g_dump_to, g_dump_list;
+static int dumping(void) {
+    static int init;
+    if (!init) {
+        init = 1;
+        const char *e = getenv("PSPRECOMP_GE_DUMP");
+        if (e && *e) {
+            unsigned long long a = 0, k = 4;
+            sscanf(e, "%llu,%llu", &a, &k);
+            g_dump_from = a; g_dump_to = a + k;
+            g_dump = fopen("ge_dump.txt", "w");
+        }
+    }
+    return g_dump && g_ge.lists >= g_dump_from && g_ge.lists < g_dump_to;
+}
+
+static void dump_prim(uint32_t type, uint32_t count, const psp_vertex *v, uint32_t n,
+                      const vlayout *L) {
+    if (g_dump_list != g_ge.lists) {
+        g_dump_list = g_ge.lists;
+        fprintf(g_dump, "=== list %llu\n", (unsigned long long)g_ge.lists);
+    }
+    static float last[40];
+    float now[40];
+    memcpy(now, g_xf.world, 12 * 4); memcpy(now + 12, g_xf.view, 12 * 4); memcpy(now + 24, g_xf.proj, 16 * 4);
+    if (memcmp(now, last, sizeof now)) {
+        memcpy(last, now, sizeof now);
+        fprintf(g_dump, "  world"); for (int i = 0; i < 12; i++) fprintf(g_dump, " %g", g_xf.world[i]);
+        fprintf(g_dump, "\n  view "); for (int i = 0; i < 12; i++) fprintf(g_dump, " %g", g_xf.view[i]);
+        fprintf(g_dump, "\n  proj "); for (int i = 0; i < 16; i++) fprintf(g_dump, " %g", g_xf.proj[i]);
+        fprintf(g_dump, "\n  vp scale %g %g %g pos %g %g %g off %g %g uv %g %g %g %g\n",
+                g_xf.xscale, g_xf.yscale, g_xf.zscale, g_xf.xpos, g_xf.ypos, g_xf.zpos,
+                g_xf.offx, g_xf.offy, g_xf.uscale, g_xf.vscale, g_xf.uoff, g_xf.voff);
+        fprintf(g_dump, "  from: world 0x%08X view 0x%08X proj 0x%08X yscale 0x%08X offy 0x%08X\n",
+                g_cmd_at[GE_WORLD], g_cmd_at[GE_VIEW], g_cmd_at[GE_PROJ], g_cmd_at[GE_YSCALE],
+                g_cmd_at[GE_OFFSETY]);
+        const uint32_t from[2] = { g_cmd_at[GE_PROJ] - 64, g_cmd_at[GE_YSCALE] - 32 };
+        for (int k = 0; k < 2; k++) {
+            fprintf(g_dump, "  words at 0x%08X:", from[k]);
+            for (uint32_t i = 0; i < 24; i++) fprintf(g_dump, " %08X", psp_read32(from[k] + i * 4));
+            fprintf(g_dump, "\n");
+        }
+    }
+    fprintf(g_dump, "  %s x%u vtype %06X vaddr %08X fb %08X/%u%s%s%s z%d/%d/%d tex %d %08X fmt %d %dx%d fn %d\n",
+            PRIM_NAME[type & 7], count, g_ge.vtype, g_ge.vaddr, g_ge.fbp, g_ge.fbw,
+            g_ds.clear ? " CLEAR" : "", g_ds.blend ? " blend" : "", VT_THROUGH(g_ge.vtype) ? " through" : "",
+            g_ds.ztest, g_ds.ztest_func, g_ds.zwrite,
+            g_ds.tex_enable, g_ds.tex_addr, g_ds.tex_fmt, g_ds.tex_w, g_ds.tex_h, g_ds.tex_func);
+    for (uint32_t i = 0; i < n && i < 4; i++) {
+        float pos[3], uv[2];
+        read_pos_uv(g_ge.vaddr + vertex_index(g_ge.vtype, i) * (uint32_t)L->stride, g_ge.vtype, L,
+                    (int)VT_THROUGH(g_ge.vtype), pos, uv);
+        fprintf(g_dump, "    v%u (%g %g %g) -> %d %d z %g w %g uv %g %g c %08X\n", i,
+                pos[0], pos[1], pos[2], v[i].x, v[i].y, v[i].z, v[i].w, v[i].u, v[i].v, v[i].rgba);
+    }
+    fflush(g_dump);
+}
+
 static void draw_prim(uint32_t type, uint32_t count) {
     if (!g_ge.vaddr) { g_unsupported += count; return; }
 
@@ -560,6 +688,7 @@ static void draw_prim(uint32_t type, uint32_t count) {
 
     int behind = 0;
     uint32_t n = 0;
+    const int dump = dumping();
     for (; n < count; n++) {
         const uint32_t idx = vertex_index(vtype, n);
         const int ok = read_vertex(g_ge.vaddr + idx * (uint32_t)stride, vtype, &L, &v[n]);
@@ -568,6 +697,7 @@ static void draw_prim(uint32_t type, uint32_t count) {
         if (ok < 0) behind = 1;
     }
 
+    if (dump) dump_prim(type, count, v, n, &L);
     if (n && !behind) {
         be->draw((int)type, v, (int)n, &g_ds);
     } else if (n && type >= 3 && type <= 5) {
@@ -607,11 +737,13 @@ static uint32_t rel_addr(const ge_queue *q, uint32_t arg) {
 }
 
 static void run_list(ge_queue *q) {
-    uint32_t stack[GE_STACK][2];        /* return address, offset */
-    int sp = 0;
+    uint32_t (*stack)[3] = q->stack;
+    int sp = q->sp;
     uint64_t budget = 1u << 22;
 
     g_ge.lists++;
+    if (dumping()) fprintf(g_dump, "=== run list %u at 0x%08X (lists %llu)\n", q->id, q->list,
+                           (unsigned long long)g_ge.lists);
 
     while (budget--) {
         if (q->stall && q->list == q->stall) break;   /* caught up to the CPU */
@@ -621,6 +753,9 @@ static void run_list(ge_queue *q) {
         uint32_t arg  = word & 0x00FFFFFF;
         q->list += 4;
         g_ge.commands++;
+        g_cmd_at[cmd] = q->list - 4;
+        const uint32_t prev = q->prev;
+        q->prev = word;
 
         switch (cmd) {
         case GE_NOP:
@@ -642,14 +777,35 @@ static void run_list(ge_queue *q) {
             break;
 
         case GE_JUMP:
-            q->list = rel_addr(q, arg & 0xFFFFFC);
+        case GE_CALL: {
+            uint32_t to = rel_addr(q, arg & 0xFFFFFC);
+            if (!psp_mem_ptr(to, 4)) {
+                /* A jump into nothing: say where it came from, then stop this
+                 * list instead of walking unmapped memory. */
+                static int told;
+                if (told++ < 8) {
+                    fprintf(stderr, "ge: %s at 0x%08X to unmapped 0x%08X (word 0x%08X, base 0x%08X, offset 0x%08X)\n",
+                            cmd == GE_JUMP ? "JUMP" : "CALL", q->list - 4, to, word, q->base, q->offset);
+                    fprintf(stderr, "ge: list %u started at 0x%08X; last transfers"
+                                    " (C call, J jump, R ret, S signal, T stall resume):\n", q->id, q->start);
+                    for (int k = g_nflow > 16 ? g_nflow - 16 : 0; k < g_nflow; k++)
+                        fprintf(stderr, "    %c 0x%08X -> 0x%08X\n", g_flow[k % 16].kind,
+                                g_flow[k % 16].from, g_flow[k % 16].to);
+                }
+                q->done = 1;
+                q->used = 0;
+                return;
+            }
+            flow(q->list - 4, to, cmd == GE_CALL ? 'C' : 'J');
+            if (cmd == GE_CALL && sp < GE_STACK) {
+                stack[sp][0] = q->list; stack[sp][1] = q->offset; stack[sp][2] = q->base; sp++;
+            }
+            q->list = to;
             break;
-        case GE_CALL:
-            if (sp < GE_STACK) { stack[sp][0] = q->list; stack[sp][1] = q->offset; sp++; }
-            q->list = rel_addr(q, arg & 0xFFFFFC);
-            break;
+        }
         case GE_RET:
-            if (sp > 0) { sp--; q->list = stack[sp][0]; q->offset = stack[sp][1]; }
+            flow(q->list - 4, sp > 0 ? stack[sp - 1][0] : 0, 'R');
+            if (sp > 0) { sp--; q->list = stack[sp][0]; q->offset = stack[sp][1]; q->base = stack[sp][2]; }
             break;
         case GE_BJUMP:
             /* Conditional on the bounding-box test, which needs geometry we do
@@ -659,6 +815,28 @@ static void run_list(ge_queue *q) {
             break;
 
         case GE_END:
+            /* END after SIGNAL is part of the signal, not the end of the list
+             * (PPSSPP's Execute_End): the handler kinds carry on, and 0x10-0x16
+             * jump, call or return, to (signal << 16) | END's low 16 bits. */
+            if ((prev >> 24) == GE_SIGNAL) {
+                const uint32_t behaviour = (prev >> 16) & 0xFF;
+                uint32_t target = (((prev & 0xFFFF) << 16) | (arg & 0xFFFF)) & 0xFFFFFFFCu;
+                if (behaviour == 0x13 || behaviour == 0x14) target += q->list - 8;          /* relative */
+                else if (behaviour == 0x15 || behaviour == 0x16) target = rel_addr(q, target); /* origin */
+                if (behaviour == 0x12) {                                                   /* RET */
+                    if (sp > 0) { sp--; q->list = stack[sp][0]; q->offset = stack[sp][1]; q->base = stack[sp][2]; }
+                } else if (behaviour >= 0x10 && behaviour <= 0x16) {
+                    if (!psp_mem_ptr(target, 4)) break;
+                    if (behaviour == 0x11 || behaviour == 0x14 || behaviour == 0x16) {    /* CALL */
+                        if (sp >= GE_STACK) break;
+                        stack[sp][0] = q->list; stack[sp][1] = q->offset; stack[sp][2] = q->base; sp++;
+                    }
+                    flow(q->list - 8, target, 'S');
+                    q->list = target;
+                }
+                break;
+            }
+            /* fall through: a plain END ends the list */
         case GE_FINISH:
             if (cmd == GE_FINISH) {
                 const ge_cb *cb = queue_cb(q);
@@ -688,6 +866,15 @@ static void run_list(ge_queue *q) {
          * OFFSET_ADDR (or ORIGIN_ADDR, "relative to this command") is added
          * on top. Model data with its own CALLs into itself is written
          * ORIGIN-relative, so it works wherever it is loaded. */
+        case GE_TRXSBP:  g_trx.sbp = arg; break;
+        case GE_TRXSBW:  g_trx.sbw = arg; break;
+        case GE_TRXDBP:  g_trx.dbp = arg; break;
+        case GE_TRXDBW:  g_trx.dbw = arg; break;
+        case GE_TRXSPOS: g_trx.spos = arg; break;
+        case GE_TRXDPOS: g_trx.dpos = arg; break;
+        case GE_TRXSIZE: g_trx.size = arg; break;
+        case GE_TRXKICK: trx_kick(arg); break;
+
         case GE_BASE:        q->base = g_base = (arg & 0x0F0000) << 8; break;
         case GE_ORIGIN_ADDR: q->offset = q->list - 4; break;
         case GE_OFFSET_ADDR: q->offset = arg << 8; break;
@@ -840,6 +1027,7 @@ static void run_list(ge_queue *q) {
             break;
         }
     }
+    q->sp = sp;                         /* stalled: the next run resumes here */
 }
 
 /* ---- the calls ----------------------------------------------------------- */
@@ -859,6 +1047,7 @@ static void enqueue(int head) {
     memset(q, 0, sizeof *q);
     q->id    = g_next_id++;
     q->list  = psp_arg(0) & ~3u;
+    q->start = q->list;
     q->stall = psp_arg(1) & ~3u;
     q->used  = 1;
     q->cbid  = (int32_t)psp_arg(2);
@@ -888,7 +1077,7 @@ static void hle_ListUpdateStallAddr(void) {
         return;
     }
     q->stall = psp_arg(1) & ~3u;
-    if (!q->done) run_list(q);          /* the new stall released more commands */
+    if (!q->done) { flow(q->list, q->list, 'T'); run_list(q); }   /* the new stall released more commands */
     psp_ret(SCE_KERNEL_ERROR_OK);
     psp_ge_deliver_pending();
 }
