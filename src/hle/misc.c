@@ -8,6 +8,7 @@
  */
 
 #include "psprecomp/hle.h"
+#include "psprecomp/mem.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -182,10 +183,31 @@ static void hle_ChRelease(void) {
     psp_ret(SCE_KERNEL_ERROR_OK);
 }
 
-/* Nothing consumes the samples; the block count is what tells you audio is
- * flowing. */
-static void hle_Output(void) {
+/* The block count is what tells you audio is flowing; a sink, when the host
+ * set one, gets the samples too. The four output calls differ in where the
+ * buffer is: (ch, vol, buf) and (ch, vol_l, vol_r, buf). */
+static psp_audio_sink_fn g_audio_sink;
+void psp_audio_set_sink(psp_audio_sink_fn fn) { g_audio_sink = fn; }
+
+static void audio_emit(int panned) {
+    uint32_t ch = psp_arg(0);
     g_audio_blocks++;
+    if (!g_audio_sink || ch >= AUDIO_CHANNELS || !g_audio[ch].samples) return;
+    uint32_t buf = psp_arg(panned ? 3 : 2);
+    int vol_l = (int)(psp_arg(1) & 0xFFFF), vol_r = panned ? (int)(psp_arg(2) & 0xFFFF) : vol_l;
+    int stereo = g_audio[ch].format != 0x10;          /* PSP_AUDIO_FORMAT_MONO */
+    uint32_t frames = g_audio[ch].samples;
+    const int16_t *pcm = (const int16_t *)psp_mem_ptr(buf, frames * (stereo ? 4u : 2u));
+    if (pcm) g_audio_sink((int)ch, pcm, frames, stereo, vol_l, vol_r);
+}
+
+static void hle_Output(void) {
+    audio_emit(0);
+    psp_ret(psp_arg(0) < AUDIO_CHANNELS ? g_audio[psp_arg(0)].samples : 0);
+}
+
+static void hle_OutputPanned(void) {
+    audio_emit(1);
     psp_ret(psp_arg(0) < AUDIO_CHANNELS ? g_audio[psp_arg(0)].samples : 0);
 }
 
@@ -211,13 +233,13 @@ static uint64_t host_now_us(void) {
 static uint64_t g_audio_due_us[AUDIO_CHANNELS];
 #endif
 
-static void hle_OutputBlocking(void) {
+static void output_blocking(int panned) {
     uint32_t ch = psp_arg(0);
     uint32_t samples = ch < AUDIO_CHANNELS ? g_audio[ch].samples : 0;
     static int traced;
     if (getenv("PSPRECOMP_TRACE_SAS") && traced++ < 4)
-        fprintf(stderr, "audio: OutputBlocking ch %u samples %u buf 0x%08X\n", ch, samples, psp_arg(2));
-    hle_Output();
+        fprintf(stderr, "audio: OutputBlocking ch %u samples %u buf 0x%08X\n", ch, samples, psp_arg(panned ? 3 : 2));
+    audio_emit(panned);
     const uint64_t play_us = (uint64_t)samples * 1000000u / 44100u;
 #if PSPRECOMP_REAL_THREADS
     if (ch < AUDIO_CHANNELS) {
@@ -231,6 +253,9 @@ static void hle_OutputBlocking(void) {
 #endif
     psp_ret(samples);
 }
+
+static void hle_OutputBlocking(void)       { output_blocking(0); }
+static void hle_OutputPannedBlocking(void) { output_blocking(1); }
 
 /* The sample count a channel outputs per call. It is set at reserve time and
  * changed here; ignoring the change left WTF's channel at its reserved length,
@@ -305,8 +330,9 @@ void psp_misc_register(void) {
     psp_hle_register(0x5EC81C55, "sceAudio", "sceAudioChReserve",            hle_ChReserve);
     psp_hle_register(0x6FC46853, "sceAudio", "sceAudioChRelease",            hle_ChRelease);
     psp_hle_register(0x136CAF51, "sceAudio", "sceAudioOutputBlocking",       hle_OutputBlocking);
-    psp_hle_register(0x13F592BC, "sceAudio", "sceAudioOutputPannedBlocking", hle_OutputBlocking);
-    psp_hle_register(0xE2D56B2D, "sceAudio", "sceAudioOutputPanned",         hle_Output);
+    psp_hle_register(0x13F592BC, "sceAudio", "sceAudioOutputPannedBlocking", hle_OutputPannedBlocking);
+    psp_hle_register(0xE2D56B2D, "sceAudio", "sceAudioOutputPanned",         hle_OutputPanned);
+    psp_hle_register(0x8C1009B2, "sceAudio", "sceAudioOutput",               hle_Output);
     psp_hle_register(0xB011922F, "sceAudio", "sceAudioGetChannelRestLength", hle_GetChannelRestLength);
     psp_hle_register(0xCB2E439E, "sceAudio", "sceAudioSetChannelDataLen",    hle_SetChannelDataLen);
     psp_hle_register(0x95FD0C2D, "sceAudio", "sceAudioChangeChannelConfig",  hle_ok);
