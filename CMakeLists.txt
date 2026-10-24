@@ -38,6 +38,7 @@ add_library(psprecomp STATIC
     src/dispatch.c
     src/ctors.c
     src/render.c
+    src/render_gl.c
     src/vfpu.c
     src/traps.c
     src/hle/hle.c
@@ -69,7 +70,8 @@ target_compile_definitions(psprecomp PUBLIC
 if(PSPRECOMP_REAL_THREADS AND WIN32)
     target_link_libraries(psprecomp PUBLIC winmm)   # timeBeginPeriod
 endif()
-if(PSPRECOMP_REAL_THREADS AND NOT WIN32)
+# render_gl.c's render thread needs threads whatever the scheduler.
+if(NOT WIN32)
     find_package(Threads REQUIRED)
     target_link_libraries(psprecomp PUBLIC Threads::Threads)
 endif()
