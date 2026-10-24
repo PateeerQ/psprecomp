@@ -413,14 +413,16 @@ void psp_vmidt(uint32_t vd, int size) {
  *
  * Which element gets the 1 is encoded in the destination register number
  * rather than given as an operand, which is how one instruction builds any
- * basis vector. Bits 6-7 of vd select the position.
+ * basis vector. The register's column bits select the position: bit 0 for a
+ * pair, bits 0-1 for a quad (PPSSPP's Int_Vidt), so vidt.q C000..C030 are the
+ * four columns of an identity matrix.
  *
  * This is matrix-setup code. Trapping it to a no-op leaves whatever was in the
  * register, so downstream geometry is built on a basis that is not a basis. */
 void psp_vidt(uint32_t vd, int size) {
     if (compat_prefix_trap("vidt")) return;
     float out[4];
-    const int one = (int)((vd >> 6) & 3);
+    const int one = (int)(vd & (size == 2 ? 1u : 3u));
     for (int i = 0; i < 4; i++) out[i] = (i == one) ? 1.0f : 0.0f;
     vwrite(vd, size, out);
 }
