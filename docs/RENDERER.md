@@ -64,6 +64,10 @@ typedef struct {
 
     /* Present whatever has accumulated (sceDisplaySetFrameBuf). */
     void (*present)(void);
+
+    /* The last frame shown, for backends whose pixels are not in guest
+     * memory (psp_display_capture). NULL: read memory. */
+    int  (*capture)(uint32_t *rgba);
 } psp_render_backend;
 ```
 
@@ -79,7 +83,38 @@ backend is wrong the same way, which is at least diagnosable.
 |---|---|---|
 | **software** | Working | The reference. Triangles, strips, fans and sprites; textures (all non-DXT formats, swizzle, CLUTs) through the shared `psp_tex_fetch()`; texture function, alpha test, blend, clear mode, scissor. Tests assert pixel positions and colours. No depth, no GPU, no dependencies, runs in CI. |
 | **null** | Working | Counts primitives, draws nothing. What the bring-up host uses when the question is "did it ask to draw". |
-| **sdl3-vulkan** | Not started | The intended presentation path. See below. |
+| **gl** | Working | `src/render_gl.c`: GL 3.3 core or GLES 3.0, at an integer multiple of 480x272. See below. |
+| **sdl3-vulkan** | Not started | See below. |
+
+## The GL backend
+
+Shaped like PPSSPP's GPU backends (read for reference, none of its code):
+
+- **Render thread.** The GE runs on whichever guest thread submitted a list,
+  and a context can be current on one thread only. So the GE side records
+  commands (framebuffer binds, texture uploads, draws with their state already
+  turned into GL enums) and `present` hands the frame to a render thread that
+  owns the context, one frame behind. The host supplies the context through
+  `psp_gl_host` (create, `get_proc`, swap, drawable size) and calls
+  `psp_render_gl_start()`.
+- **Framebuffer manager.** Each framebuffer address the GE draws to is an FBO
+  (colour texture plus depth). `present` shows the FBO at the display address,
+  or guest memory when the GE never drew there (a CPU-drawn screen). A texture
+  whose address lies inside a drawn framebuffer samples that FBO: render to
+  texture with no readback.
+- **Texture cache.** Decoded through `psp_tex_fetch()`, keyed by address,
+  format, size, buffer width, swizzle and a hash of the CLUT; the memory is
+  re-hashed once a frame (and whenever a small texture is bound anew) and
+  re-decoded when it changed.
+- **Pixels.** One shader does `fragment()`'s work in the same order: texture
+  function, colour doubling, fog, alpha test. Blend, depth test and write,
+  scissor and the clear mode's masks are GL state. The framebuffer's alpha is
+  the source alpha, as in the software backend.
+
+Missing: points and lines, stencil, colour test, logic ops, dithering, mipmaps,
+the CPU reading a framebuffer, block transfers into one, and blend modes GL has
+no factor for (doubled alphas, absolute difference, two different fixed
+colours), which are approximated.
 
 ## The SDL3 + Vulkan backend, when it happens
 
