@@ -144,6 +144,9 @@ uint32_t psp_display_framebuffer(void);
 /* The framebuffer as last set: address, stride in pixels, pixel format
  * (0 565, 1 5551, 2 4444, 3 8888). For a host that shows frames itself. */
 void     psp_display_get(uint32_t *addr, uint32_t *stride, uint32_t *format);
+/* Frames shown so far (SetFrameBuf calls), and the longest gap between two
+ * since the last call, in microseconds (reset by reading it). */
+void     psp_display_frame_stats(uint64_t *flips, uint64_t *max_gap_us);
 
 void psp_ge_init(void);
 void psp_ge_register(void);
