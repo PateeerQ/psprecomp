@@ -15,6 +15,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #define PSP_SCREEN_W 480
 #define PSP_SCREEN_H 272
@@ -85,8 +86,28 @@ static void hle_SetMode(void) {
     psp_ret(SCE_KERNEL_ERROR_OK);
 }
 
+/* Frame pacing as the host sees it: each SetFrameBuf is a finished frame, so
+ * the count and the longest gap between two are the game's FPS and its worst
+ * frametime. psp_display_frame_stats() reads and resets the longest gap. */
+static volatile uint64_t g_flips, g_flip_last_us, g_flip_max_us;
+
+static uint64_t flip_now_us(void) {
+    struct timespec ts;
+    timespec_get(&ts, TIME_UTC);
+    return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
+}
+
+void psp_display_frame_stats(uint64_t *flips, uint64_t *max_gap_us) {
+    if (flips) *flips = g_flips;
+    if (max_gap_us) { *max_gap_us = g_flip_max_us; g_flip_max_us = 0; }
+}
+
 static void hle_SetFrameBuf(void) {
     /* (topaddr, bufferwidth, pixelformat, sync) */
+    const uint64_t now = flip_now_us();
+    if (g_flip_last_us && now - g_flip_last_us > g_flip_max_us) g_flip_max_us = now - g_flip_last_us;
+    g_flip_last_us = now;
+    g_flips++;
     g_fb_addr   = psp_arg(0);
     g_fb_width  = psp_arg(1);
     g_fb_format = psp_arg(2);
