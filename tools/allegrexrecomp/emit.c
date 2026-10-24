@@ -1468,6 +1468,17 @@ int a_emit(const a_analysis *an, const emit_opts *o) {
     for (i = 0; i < an->nfuncs; i++)
         fprintf(of.f, "    psp_register(0x%08Xu, psp_func_%08X);\n",
                 an->funcs[i].addr, an->funcs[i].addr);
+    /* Import stubs after the functions, replacing them. The stub in the file
+     * is `jr ra; nop` until the loader patches it, and decoded as code that
+     * is a function doing nothing. Direct calls in this module are emitted as
+     * psp_import_X() and never see it, but anything reaching a stub through
+     * the table -- an overlay's jal into the EBOOT's stubs, a function
+     * pointer -- got the no-op: every firmware call MHFU's overlays made
+     * (sceDmacMemcpy uploading the village's models to VRAM among them)
+     * silently did nothing. */
+    for (i = 0; i < an->nimports; i++)
+        fprintf(of.f, "    psp_register(0x%08Xu, psp_import_%08X);\n",
+                an->imports[i], an->imports[i]);
     /* Interior labels last, so a real function entry always wins a collision. */
     for (i = 0; i < c.nentries; i++)
         fprintf(of.f, "    psp_register_label(0x%08Xu, psp_at_%08X);\n",
