@@ -83,6 +83,32 @@
 #define GE_OFFSETX      0x4C
 #define GE_OFFSETY      0x4D
 #define GE_SHADE        0x50
+/* Lighting, texture generation and fog (PPSSPP's ge_constants.h names). */
+#define GE_LTE          0x17
+#define GE_LTE0         0x18
+#define GE_FGE          0x1F
+#define GE_TMS          0x40
+#define GE_TMATRIX      0x41
+#define GE_RNORM        0x51
+#define GE_CMAT         0x53
+#define GE_EMC          0x54
+#define GE_DMC          0x56
+#define GE_SMC          0x57
+#define GE_SPOW         0x5B
+#define GE_ALC          0x5C
+#define GE_ALA          0x5D
+#define GE_LT0          0x5F
+#define GE_LXP0         0x63
+#define GE_LXD0         0x6F
+#define GE_LCA0         0x7B
+#define GE_SPOTEXP0     0x87
+#define GE_SPOTCUT0     0x8B
+#define GE_LAC0         0x8F
+#define GE_TMAP         0xC0
+#define GE_TSHADE       0xC1
+#define GE_FFAR         0xCD
+#define GE_FDIST        0xCE
+#define GE_FCOL         0xCF
 #define GE_AMC          0x55
 #define GE_AMA          0x58
 #define GE_FBP          0x9C
@@ -166,6 +192,9 @@ static void trx_kick(uint32_t arg) {
     const uint32_t w = (g_trx.size & 0x3FF) + 1, h = ((g_trx.size >> 10) & 0x3FF) + 1;
     const uint32_t bpp = (arg & 1) ? 4 : 2;
     g_trx_count++;
+    if (getenv("PSPRECOMP_TRACE_TRX"))
+        fprintf(stderr, "ge: block transfer 0x%08X (%u,%u) stride %u -> 0x%08X (%u,%u) stride %u, %ux%u x%u bytes\n",
+                src, sx, sy, sstride, dst, dx, dy, dstride, w, h, bpp);
     for (uint32_t y = 0; y < h; y++) {
         const uint32_t from = src + ((sy + y) * sstride + sx) * bpp;
         const uint32_t to   = dst + ((dy + y) * dstride + dx) * bpp;
@@ -268,20 +297,35 @@ static uint8_t  g_clut[1024];      /* the GE's CLUT cache, filled by CLOAD */
 static uint32_t g_material = 0xFFFFFFFFu;
 
 /* The transform pipeline. Matrices are uploaded one float per command, column
- * by column: world and view are 4x3 (the last column is the translation),
- * projection is 4x4. The viewport maps clip space into the GE's 4096-wide
- * drawing space, and the offset moves the screen's top-left within it. */
+ * by column: world, view and the texture-generation matrix are 4x3 (the last
+ * column is the translation), projection is 4x4. The viewport maps clip space
+ * into the GE's 4096-wide drawing space, and the offset moves the screen's
+ * top-left within it. */
 static struct {
-    float world[12], view[12], proj[16];
-    int   wi, vi, pi;
+    float world[12], view[12], proj[16], tgen[12];
+    int   wi, vi, pi, ti;
     float bone[8 * 12];                 /* BONE, eight 4x3 matrices */
     int   bi;
     float morph[8];                     /* MW0-7 */
     float xscale, yscale, xpos, ypos, zscale, zpos;
     float offx, offy;                   /* pixels */
     float uscale, vscale, uoff, voff;
-    uint64_t behind;                    /* primitives dropped with w <= 0 */
+    int   uv_mode, uv_proj, ls0, ls1;   /* TMAP, TSHADE */
+    float fog1, fog2;                   /* FOG1, FOG2 */
+    uint64_t behind;                    /* triangles wholly behind the near plane */
+    uint64_t clipped;                   /* triangles cut by it */
 } g_xf;
+
+/* Vertex lighting state (LTE and friends). Colours are as the commands carry
+ * them, 0xBBGGRR; positions, directions and factors are GE floats. */
+static struct {
+    int      enable, on[4], type[4], comp[4];
+    float    pos[4][3], dir[4][3], att[4][3], spot_exp[4], spot_cut[4];
+    uint32_t lac[4], ldc[4], lsc[4];
+    uint32_t emissive, diffuse, specular, ambient;   /* ambient: ALC | ALA << 24 */
+    float    spec_exp;
+    int      mat_update, reverse_normal;
+} g_lt;
 
 /* GE floats are the top 24 bits of an IEEE single. */
 static float f24(uint32_t arg) {
@@ -290,35 +334,147 @@ static float f24(uint32_t arg) {
     return c.f;
 }
 
+/* The exponent of the lighting pow (specular, spot): the GE keeps only the top
+ * 4 mantissa bits and saturates at 496 (PPSSPP's PSPLightExponent). */
+static float light_exponent(float e) {
+    if (isnan(e)) return signbit(e) ? 0.0f : 496.0f;
+    if (e >= 512.0f) return 496.0f;
+    union { uint32_t u; float f; } c;
+    c.f = e;
+    c.u &= 0xFFF80000u;
+    return c.f;
+}
+
 static void xf_reset(void) {
     memset(&g_xf, 0, sizeof g_xf);
     g_xf.world[0] = g_xf.world[4] = g_xf.world[8] = 1;
     g_xf.view[0] = g_xf.view[4] = g_xf.view[8] = 1;
+    g_xf.tgen[0] = g_xf.tgen[4] = g_xf.tgen[8] = 1;
     g_xf.proj[0] = g_xf.proj[5] = g_xf.proj[10] = g_xf.proj[15] = 1;
     g_xf.uscale = g_xf.vscale = 1;
     g_xf.morph[0] = 1;
     for (int b = 0; b < 8; b++)
         g_xf.bone[b * 12 + 0] = g_xf.bone[b * 12 + 4] = g_xf.bone[b * 12 + 8] = 1;
+    memset(&g_lt, 0, sizeof g_lt);
 }
 
-/* Model space to screen pixels. Returns 0 for a point behind the eye.
- * ponytail: no near-plane clipping, so a primitive with any vertex behind the
- * eye is dropped whole; add clipping when 3D scenes lose triangles. */
-static int transform(const float p[3], float *sx, float *sy, float *sz, float *iw) {
-    const float *W = g_xf.world, *V = g_xf.view, *P = g_xf.proj;
-    float w[3], v[3], c[4];
+/* p times a 4x3 matrix: a point with w = 1, or a direction with w = 0. */
+static void mul43(const float *M, const float p[3], float w, float out[3]) {
     for (int r = 0; r < 3; r++)
-        w[r] = W[r] * p[0] + W[3 + r] * p[1] + W[6 + r] * p[2] + W[9 + r];
-    for (int r = 0; r < 3; r++)
-        v[r] = V[r] * w[0] + V[3 + r] * w[1] + V[6 + r] * w[2] + V[9 + r];
+        out[r] = M[r] * p[0] + M[3 + r] * p[1] + M[6 + r] * p[2] + M[9 + r] * w;
+}
+
+/* World space to clip space; `view` gets the view-space position (for fog). */
+static void world_to_clip(const float w[3], float view[3], float c[4]) {
+    const float *P = g_xf.proj;
+    mul43(g_xf.view, w, 1.0f, view);
     for (int r = 0; r < 4; r++)
-        c[r] = P[r] * v[0] + P[4 + r] * v[1] + P[8 + r] * v[2] + P[12 + r];
-    if (c[3] <= 0) return 0;
-    *sx = c[0] / c[3] * g_xf.xscale + g_xf.xpos - g_xf.offx;
-    *sy = c[1] / c[3] * g_xf.yscale + g_xf.ypos - g_xf.offy;
-    *sz = c[2] / c[3] * g_xf.zscale + g_xf.zpos;
-    *iw = 1.0f / c[3];
-    return 1;
+        c[r] = P[r] * view[0] + P[4 + r] * view[1] + P[8 + r] * view[2] + P[12 + r];
+}
+
+/* Clip space to screen pixels, depth and 1/w. Only for points in front of the
+ * near plane: clipping happens before this. */
+static void clip_to_screen(const float c[4], psp_vertex *out) {
+    const float iw = 1.0f / c[3];
+    float sx = c[0] * iw * g_xf.xscale + g_xf.xpos - g_xf.offx;
+    float sy = c[1] * iw * g_xf.yscale + g_xf.ypos - g_xf.offy;
+    /* Keep wildly off-screen vertices inside int range; the rasterizer clips
+     * to the screen anyway. */
+    if (sx < -100000.0f) sx = -100000.0f; else if (sx > 100000.0f) sx = 100000.0f;
+    if (sy < -100000.0f) sy = -100000.0f; else if (sy > 100000.0f) sy = 100000.0f;
+    out->x = (int)floorf(sx);
+    out->y = (int)floorf(sy);
+    out->z = c[2] * iw * g_xf.zscale + g_xf.zpos;
+    out->w = iw;
+}
+
+static void normalize3(float v[3], float fallback_z) {
+    const float l = sqrtf(v[0] * v[0] + v[1] * v[1] + v[2] * v[2]);
+    if (l > 0.0f) { v[0] /= l; v[1] /= l; v[2] /= l; }
+    else { v[0] = v[1] = 0.0f; v[2] = fallback_z; }
+}
+
+static float dot3(const float a[3], const float b[3]) {
+    return a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+}
+
+static float light_pow(float x, float e) { return e <= 0.0f ? 1.0f : powf(x > 0.0f ? x : 0.0f, e); }
+
+/* One channel of a 0xBBGGRR / 0xAABBGGRR colour, 0-1. */
+static float ch(uint32_t c, int i) { return (float)((c >> (i * 8)) & 0xFF) / 255.0f; }
+
+/* The direction from a vertex to light l, normalised, and the light's
+ * attenuation and spot factor. */
+static float light_vector(int l, const float wpos[3], float L[3]) {
+    if (g_lt.type[l] == 0) {                        /* directional */
+        L[0] = g_lt.pos[l][0]; L[1] = g_lt.pos[l][1]; L[2] = g_lt.pos[l][2];
+        normalize3(L, 0.0f);
+        return 1.0f;
+    }
+    for (int i = 0; i < 3; i++) L[i] = g_lt.pos[l][i] - wpos[i];
+    const float d2 = dot3(L, L), d = sqrtf(d2);
+    if (d > 0.0f) { L[0] /= d; L[1] /= d; L[2] /= d; }
+    else { L[0] = L[1] = 0.0f; L[2] = 1.0f; }
+    const float den = g_lt.att[l][0] + g_lt.att[l][1] * d + g_lt.att[l][2] * d2;
+    float scale = den > 0.0f ? 1.0f / den : 0.0f;
+    if (!(scale > 0.0f)) scale = 0.0f; else if (scale > 1.0f) scale = 1.0f;
+    if (g_lt.type[l] >= 2) {                        /* spot */
+        float D[3] = { g_lt.dir[l][0], g_lt.dir[l][1], g_lt.dir[l][2] };
+        normalize3(D, 0.0f);
+        const float angle = dot3(D, L);
+        scale = angle >= g_lt.spot_cut[l] ? scale * light_pow(angle, g_lt.spot_exp[l]) : 0.0f;
+    }
+    return scale;
+}
+
+/* The viewer sits at infinity along view-space +z; in world space that is the
+ * view matrix's third row. */
+static void view_dir(float out[3]) {
+    out[0] = g_xf.view[2]; out[1] = g_xf.view[5]; out[2] = g_xf.view[8];
+    normalize3(out, 1.0f);
+}
+
+/* Vertex lighting, the model PPSSPP's vertex shaders use: emissive, plus the
+ * ambient light times the material ambient, plus per light the ambient,
+ * diffuse (N.L) and specular (Blinn half vector) terms scaled by attenuation
+ * and spot. The material colours come from the vertex where MATERIALUPDATE
+ * says so. Specular is added straight into the colour; the GE can instead keep
+ * it as a secondary colour added after texturing (LIGHTMODE), which this does
+ * not model. */
+static uint32_t light_vertex(const float wpos[3], const float wn[3], uint32_t vcol, int has_color) {
+    const int upd = has_color ? g_lt.mat_update : 0;
+    const uint32_t amb_c = (upd & 1) ? vcol : g_material;
+    const uint32_t dif_c = (upd & 2) ? vcol : g_lt.diffuse;
+    const uint32_t spc_c = (upd & 4) ? vcol : g_lt.specular;
+    float s0[4], s1[3] = { 0, 0, 0 };
+    for (int i = 0; i < 4; i++)
+        s0[i] = ch(g_lt.ambient, i) * ch(amb_c, i) + (i < 3 ? ch(g_lt.emissive, i) : 0.0f);
+    float V[3];
+    view_dir(V);
+    for (int l = 0; l < 4; l++) {
+        if (!g_lt.on[l]) continue;
+        float L[3];
+        const float scale = light_vector(l, wpos, L);
+        float ldot = dot3(L, wn);
+        if (g_lt.comp[l] == 2) ldot = light_pow(ldot, g_lt.spec_exp);
+        const float diffuse = ldot > 0.0f ? ldot : 0.0f;
+        if (g_lt.comp[l] == 1 && ldot >= 0.0f) {
+            float H[3] = { L[0] + V[0], L[1] + V[1], L[2] + V[2] };
+            normalize3(H, 1.0f);
+            const float sp = light_pow(dot3(H, wn), g_lt.spec_exp);
+            if (sp > 0.0f)
+                for (int i = 0; i < 3; i++) s1[i] += ch(g_lt.lsc[l], i) * ch(spc_c, i) * sp * scale;
+        }
+        for (int i = 0; i < 3; i++)
+            s0[i] += (ch(g_lt.lac[l], i) * ch(amb_c, i) + ch(g_lt.ldc[l], i) * ch(dif_c, i) * diffuse) * scale;
+    }
+    uint32_t out = 0;
+    for (int i = 0; i < 4; i++) {
+        float x = s0[i] + (i < 3 ? s1[i] : 0.0f);
+        x = x < 0.0f ? 0.0f : (x > 1.0f ? 1.0f : x);
+        out |= (uint32_t)(x * 255.0f + 0.5f) << (i * 8);
+    }
+    return out;
 }
 
 /* Tracked state, and the counters that make the report worth reading. */
@@ -363,7 +519,8 @@ void psp_ge_reset(void) {
     g_next_id = 0x00080000u;
 }
 
-void psp_ge_init(void) { psp_ge_reset(); }
+static void ge_watch_init(void);
+void psp_ge_init(void) { psp_ge_reset(); ge_watch_init(); }
 
 void psp_ge_dump_stats(FILE *out) {
     fprintf(out, "GE: %llu lists, %llu commands, %llu finishes\n",
@@ -392,9 +549,9 @@ void psp_ge_dump_stats(FILE *out) {
     fprintf(out, "    depth: ZBP 0x%06X ZBW 0x%06X, test %s func %d, %llu tested, %llu rejected, %llu cleared\n",
             g_ge.zbp, g_ge.zbw, g_ds.ztest ? "on" : "off", g_ds.ztest_func,
             (unsigned long long)zt, (unsigned long long)zf, (unsigned long long)zc);
-    if (g_xf.behind)
-        fprintf(out, "    %llu primitives dropped with a vertex behind the eye (no clipping)\n",
-                (unsigned long long)g_xf.behind);
+    if (g_xf.behind || g_xf.clipped)
+        fprintf(out, "    near plane: %llu triangles clipped, %llu wholly behind it (dropped)\n",
+                (unsigned long long)g_xf.clipped, (unsigned long long)g_xf.behind);
     if (psp_render_unsupported_texels())
         fprintf(out, "    %llu texels in an undecoded format (DXT), drawn magenta\n",
                 (unsigned long long)psp_render_unsupported_texels());
@@ -444,7 +601,7 @@ uint64_t psp_ge_pixels(void) { return psp_render_pixels(); }
  * morphing, a vertex is `morphs` such records back to back. */
 typedef struct {
     int w_off, w_n, w_sz;           /* skinning weights: count, element size */
-    int tex_off, col_off, pos_off;  /* -1 when absent (pos is never absent) */
+    int tex_off, col_off, norm_off, pos_off;  /* -1 when absent (pos never is) */
     int one;                        /* size of one morph record */
     int stride;                     /* size of the whole vertex */
     int morphs;
@@ -471,7 +628,8 @@ static int vertex_layout(uint32_t vtype, vlayout *L) {
     if (cs) { off = (off + cs - 1) & ~(cs - 1); L->col_off = off; off += cs; if (cs > align) align = cs; }
     else L->col_off = -1;
     int ns = norm_sz[VT_NORMAL(vtype)];
-    if (ns) { off = (off + ns - 1) & ~(ns - 1); off += ns * 3; if (ns > align) align = ns; }
+    if (ns) { off = (off + ns - 1) & ~(ns - 1); L->norm_off = off; off += ns * 3; if (ns > align) align = ns; }
+    else L->norm_off = -1;
     int ps = pos_sz[VT_POS(vtype)];
     if (!ps) return 0;                        /* no position: nothing to draw */
     off = (off + ps - 1) & ~(ps - 1); L->pos_off = off; off += ps * 3;
@@ -483,9 +641,9 @@ static int vertex_layout(uint32_t vtype, vlayout *L) {
     return L->stride;
 }
 
-/* Position and texture coordinate of one morph record. */
-static void read_pos_uv(uint32_t addr, uint32_t vtype, const vlayout *L, int through,
-                        float pos[3], float uv[2]) {
+/* Position, normal and texture coordinate of one morph record. */
+static void read_record(uint32_t addr, uint32_t vtype, const vlayout *L, int through,
+                        float pos[3], float nrm[3], float uv[2]) {
     uv[0] = uv[1] = 0;
     if (L->tex_off >= 0) {
         uint32_t t = addr + (uint32_t)L->tex_off;
@@ -497,6 +655,16 @@ static void read_pos_uv(uint32_t addr, uint32_t vtype, const vlayout *L, int thr
                 if (!through) { uv[0] /= 32768.0f; uv[1] /= 32768.0f; }
                 break;
         default: uv[0] = psp_read_f32(t); uv[1] = psp_read_f32(t + 4); break;
+        }
+    }
+
+    nrm[0] = nrm[1] = 0; nrm[2] = 1;
+    if (L->norm_off >= 0) {
+        const uint32_t n = addr + (uint32_t)L->norm_off;
+        switch (VT_NORMAL(vtype)) {
+        case 1:  for (int i = 0; i < 3; i++) nrm[i] = (float)(int8_t)psp_read8(n + (uint32_t)i) / 128.0f; break;
+        case 2:  for (int i = 0; i < 3; i++) nrm[i] = (float)(int16_t)psp_read16(n + (uint32_t)i * 2) / 32768.0f; break;
+        default: for (int i = 0; i < 3; i++) nrm[i] = psp_read_f32(n + (uint32_t)i * 4); break;
         }
     }
 
@@ -517,10 +685,10 @@ static void read_pos_uv(uint32_t addr, uint32_t vtype, const vlayout *L, int thr
     }
 }
 
-/* Skinning: the position becomes the weighted sum of the bone matrices applied
- * to it. Bones are 4x3, column by column like the world matrix. */
-static void skin(uint32_t addr, uint32_t vtype, const vlayout *L, float pos[3]) {
-    float out[3] = { 0, 0, 0 };
+/* Skinning: position and normal become the weighted sums of the bone matrices
+ * applied to them. Bones are 4x3, column by column like the world matrix. */
+static void skin(uint32_t addr, uint32_t vtype, const vlayout *L, float pos[3], float nrm[3]) {
+    float op[3] = { 0, 0, 0 }, on[3] = { 0, 0, 0 };
     for (int b = 0; b < L->w_n; b++) {
         const uint32_t wa = addr + (uint32_t)(L->w_off + b * L->w_sz);
         float w;
@@ -530,66 +698,159 @@ static void skin(uint32_t addr, uint32_t vtype, const vlayout *L, float pos[3]) 
         default: w = psp_read_f32(wa); break;
         }
         if (w == 0.0f) continue;
-        const float *M = g_xf.bone + b * 12;
-        for (int r = 0; r < 3; r++)
-            out[r] += w * (M[r] * pos[0] + M[3 + r] * pos[1] + M[6 + r] * pos[2] + M[9 + r]);
+        float tp[3], tn[3];
+        mul43(g_xf.bone + b * 12, pos, 1.0f, tp);
+        mul43(g_xf.bone + b * 12, nrm, 0.0f, tn);
+        for (int r = 0; r < 3; r++) { op[r] += w * tp[r]; on[r] += w * tn[r]; }
     }
-    pos[0] = out[0]; pos[1] = out[1]; pos[2] = out[2];
+    for (int r = 0; r < 3; r++) { pos[r] = op[r]; nrm[r] = on[r]; }
 }
 
-static int read_vertex(uint32_t addr, uint32_t vtype, const vlayout *L, psp_vertex *out) {
+/* A vertex as the clipper sees it: the backend's vertex, plus its clip-space
+ * position. Through-mode vertices are already on screen and never clipped. */
+typedef struct {
+    psp_vertex v;
+    float c[4];
+} cvertex;
+
+static int in_front(const cvertex *p) { return p->c[2] + p->c[3] >= 0.0f && p->c[3] > 0.0f; }
+
+static void read_vertex(uint32_t addr, uint32_t vtype, const vlayout *L, cvertex *out) {
     /* Through mode reads 8/16-bit values as integers; transformed mode reads
      * them as fixed point, signed for positions. */
     const int through = (int)VT_THROUGH(vtype);
-    out->rgba = g_material;
+    uint32_t col = g_material;
     if (L->col_off >= 0) {
         if (VT_COLOR(vtype) == 7)
-            out->rgba = psp_read32(addr + (uint32_t)L->col_off);
+            col = psp_read32(addr + (uint32_t)L->col_off);
         else    /* 4, 5, 6: 565, 5551, 4444 -- the texture formats, numbered from 4 */
-            out->rgba = psp_color_expand(psp_read16(addr + (uint32_t)L->col_off),
-                                         (int)VT_COLOR(vtype) - 4);
+            col = psp_color_expand(psp_read16(addr + (uint32_t)L->col_off),
+                                   (int)VT_COLOR(vtype) - 4);
     }
 
-    float pos[3], uv[2];
-    read_pos_uv(addr, vtype, L, through, pos, uv);
+    float pos[3], nrm[3], uv[2];
+    read_record(addr, vtype, L, through, pos, nrm, uv);
     if (L->morphs > 1) {
-        /* Morph targets blend position and texture coordinate by the MW
-         * weights; colour comes from the first record. */
-        float p[3], t[2];
-        for (int i = 0; i < 3; i++) pos[i] *= g_xf.morph[0];
+        /* Morph targets blend position, normal and texture coordinate by the
+         * MW weights; colour comes from the first record. */
+        float p[3], n[3], t[2];
+        for (int i = 0; i < 3; i++) { pos[i] *= g_xf.morph[0]; nrm[i] *= g_xf.morph[0]; }
         uv[0] *= g_xf.morph[0]; uv[1] *= g_xf.morph[0];
         for (int m = 1; m < L->morphs; m++) {
-            read_pos_uv(addr + (uint32_t)(m * L->one), vtype, L, through, p, t);
-            for (int i = 0; i < 3; i++) pos[i] += p[i] * g_xf.morph[m];
+            read_record(addr + (uint32_t)(m * L->one), vtype, L, through, p, n, t);
+            for (int i = 0; i < 3; i++) { pos[i] += p[i] * g_xf.morph[m]; nrm[i] += n[i] * g_xf.morph[m]; }
             uv[0] += t[0] * g_xf.morph[m]; uv[1] += t[1] * g_xf.morph[m];
         }
     }
 
-    out->u = uv[0]; out->v = uv[1];
-    if (L->tex_off >= 0 && !through) {     /* normalised, scaled, then in texels */
-        out->u = (out->u * g_xf.uscale + g_xf.uoff) * (float)g_ds.tex_w;
-        out->v = (out->v * g_xf.vscale + g_xf.voff) * (float)g_ds.tex_h;
+    out->v.rgba = col;
+    out->v.fog = 1.0f;
+    if (through) {
+        out->v.u = uv[0]; out->v.v = uv[1];
+        out->v.x = (int)pos[0];
+        out->v.y = (int)pos[1];
+        out->v.z = pos[2];
+        out->v.w = 0;
+        out->c[0] = out->c[1] = out->c[2] = 0; out->c[3] = 1;
+        return;
     }
 
-    if (through) {
-        out->x = (int)pos[0];
-        out->y = (int)pos[1];
-        out->z = pos[2];
-        out->w = 0;
-        return 1;
+    if (L->w_n) skin(addr, vtype, L, pos, nrm);
+    if (g_lt.reverse_normal) { nrm[0] = -nrm[0]; nrm[1] = -nrm[1]; nrm[2] = -nrm[2]; }
+
+    float wpos[3], vpos[3], wn[3];
+    mul43(g_xf.world, pos, 1.0f, wpos);
+    mul43(g_xf.world, nrm, 0.0f, wn);
+    normalize3(wn, 1.0f);
+    world_to_clip(wpos, vpos, out->c);
+
+    if (g_lt.enable) out->v.rgba = light_vertex(wpos, wn, col, L->col_off >= 0);
+
+    /* Texture coordinates: scaled and offset (mode 0), through the texture
+     * matrix (1), or from the normal's angle to two lights (2, "shade
+     * mapping", for environment maps). Then into texels. */
+    float s = uv[0], t = uv[1];
+    if (g_xf.uv_mode == 1) {
+        float src[3], tc[3];
+        switch (g_xf.uv_proj) {
+        case 0:  src[0] = pos[0]; src[1] = pos[1]; src[2] = pos[2]; break;
+        case 1:  src[0] = uv[0]; src[1] = uv[1]; src[2] = 0; break;
+        default: src[0] = nrm[0]; src[1] = nrm[1]; src[2] = nrm[2];
+                 if (g_xf.uv_proj == 2) normalize3(src, 1.0f);
+                 break;
+        }
+        mul43(g_xf.tgen, src, 1.0f, tc);
+        const float q = tc[2] != 0.0f ? tc[2] : 1.0f;
+        s = tc[0] / q * g_xf.uscale;
+        t = tc[1] / q * g_xf.vscale;
+    } else if (g_xf.uv_mode == 2) {
+        float L0[3], L1[3];
+        light_vector(g_xf.ls0, wpos, L0);
+        light_vector(g_xf.ls1, wpos, L1);
+        s = g_xf.uscale * (1.0f + dot3(L0, wn)) * 0.5f;
+        t = g_xf.vscale * (1.0f + dot3(L1, wn)) * 0.5f;
+    } else {
+        s = s * g_xf.uscale + g_xf.uoff;
+        t = t * g_xf.vscale + g_xf.voff;
     }
-    if (L->w_n && !through) skin(addr, vtype, L, pos);
-    float sx, sy, sz, iw;
-    if (!transform(pos, &sx, &sy, &sz, &iw)) return -1;
-    /* Keep wildly off-screen vertices inside int range; the rasterizer clips
-     * to the screen anyway. */
-    if (sx < -100000.0f) sx = -100000.0f; else if (sx > 100000.0f) sx = 100000.0f;
-    if (sy < -100000.0f) sy = -100000.0f; else if (sy > 100000.0f) sy = 100000.0f;
-    out->x = (int)floorf(sx);
-    out->y = (int)floorf(sy);
-    out->z = sz;
-    out->w = iw;
-    return 1;
+    out->v.u = s * (float)g_ds.tex_w;
+    out->v.v = t * (float)g_ds.tex_h;
+
+    if (g_ds.fog) {
+        float f = (vpos[2] + g_xf.fog1) * g_xf.fog2;
+        out->v.fog = f < 0.0f ? 0.0f : (f > 1.0f ? 1.0f : f);
+    }
+    if (in_front(out)) clip_to_screen(out->c, &out->v);
+}
+
+/* The point where the near plane cuts a-b, with every attribute interpolated
+ * in clip space (where they are linear). */
+static cvertex near_cut(const cvertex *a, const cvertex *b) {
+    const float da = a->c[2] + a->c[3], db = b->c[2] + b->c[3];
+    const float t = da / (da - db);
+    cvertex o;
+    for (int i = 0; i < 4; i++) o.c[i] = a->c[i] + (b->c[i] - a->c[i]) * t;
+    uint32_t rgba = 0;
+    for (int i = 0; i < 4; i++) {
+        const float ca = (float)((a->v.rgba >> (i * 8)) & 0xFF), cb = (float)((b->v.rgba >> (i * 8)) & 0xFF);
+        rgba |= (uint32_t)(ca + (cb - ca) * t + 0.5f) << (i * 8);
+    }
+    o.v.rgba = rgba;
+    o.v.u = a->v.u + (b->v.u - a->v.u) * t;
+    o.v.v = a->v.v + (b->v.v - a->v.v) * t;
+    o.v.fog = a->v.fog + (b->v.fog - a->v.fog) * t;
+    /* Just inside, so the projection never divides by a w of exactly 0. */
+    if (o.c[3] <= 0.0f) o.c[3] = 1e-6f;
+    clip_to_screen(o.c, &o.v);
+    return o;
+}
+
+/* One triangle against the near plane (z = -w): kept, dropped, or cut into
+ * one or two. Appends to `tri`; returns the vertices added. Flat shading uses
+ * the last vertex's colour, so the provoking vertex is kept last. */
+static uint32_t clip_triangle(const cvertex *a, const cvertex *b, const cvertex *c, psp_vertex *tri) {
+    const cvertex *in[3] = { a, b, c };
+    const int fa = in_front(a), fb = in_front(b), fc = in_front(c);
+    if (fa && fb && fc) { tri[0] = a->v; tri[1] = b->v; tri[2] = c->v; return 3; }
+    if (!fa && !fb && !fc) { g_xf.behind++; return 0; }
+    g_xf.clipped++;
+    cvertex poly[4];
+    int n = 0;
+    for (int i = 0; i < 3; i++) {
+        const cvertex *p = in[i], *q = in[(i + 1) % 3];
+        const int fp = in_front(p), fq = in_front(q);
+        if (fp) poly[n++] = *p;
+        if (fp != fq) poly[n++] = near_cut(p, q);
+    }
+    const uint32_t provoking = c->v.rgba;
+    uint32_t m = 0;
+    for (int i = 1; i + 1 < n; i++) {
+        tri[m] = poly[0].v; tri[m + 1] = poly[i].v; tri[m + 2] = poly[i + 1].v;
+        m += 3;
+    }
+    if (!g_ds.gouraud)
+        for (uint32_t i = 0; i < m; i++) tri[i].rgba = provoking;
+    return m;
 }
 
 /* The index of vertex `i` of a primitive: from the index buffer when VTYPE
@@ -604,10 +865,9 @@ static uint32_t vertex_index(uint32_t vtype, uint32_t i) {
 }
 
 /* PSPRECOMP_GE_DUMP=N[,K]: describe every primitive of lists N..N+K-1 (K
- * defaults to 4), with the matrices once per list. "The scene comes out as a
- * few huge triangles" is a question about specific vertices, and this is how
- * to see them. */
-static FILE *g_dump;
+ * defaults to 4), with the matrices whenever they change. "The scene comes out
+ * as a few huge triangles" is a question about specific vertices, and this is
+ * how to see them. */
 static uint32_t g_cmd_at[256];     /* where each command was last read from */
 static uint64_t g_dump_from, g_dump_to, g_dump_list;
 static int dumping(void) {
@@ -625,8 +885,34 @@ static int dumping(void) {
     return g_dump && g_ge.lists >= g_dump_from && g_ge.lists < g_dump_to;
 }
 
-static void dump_prim(uint32_t type, uint32_t count, const psp_vertex *v, uint32_t n,
-                      const vlayout *L) {
+/* PSPRECOMP_GE_WATCH=addr: when a list reaches that word, say which list and
+ * how it got there. For state that arrives from a place no list should be. */
+static uint32_t g_ge_watch;
+static void ge_watch_init(void) {
+    const char *e = getenv("PSPRECOMP_GE_WATCH");
+    if (e && *e) g_ge_watch = (uint32_t)strtoul(e, NULL, 16);
+}
+static void ge_watch_hit(const ge_queue *q, uint32_t word) {
+    static int told;
+    if (told++ >= 4) return;
+    fprintf(stderr, "ge watch: list %u (started 0x%08X, list #%llu) at 0x%08X, word 0x%08X; last transfers:\n",
+            q->id, q->start, (unsigned long long)g_ge.lists, g_ge_watch, word);
+    for (int k = g_nflow > 16 ? g_nflow - 16 : 0; k < g_nflow; k++)
+        fprintf(stderr, "    %c 0x%08X -> 0x%08X\n", g_flow[k % 16].kind,
+                g_flow[k % 16].from, g_flow[k % 16].to);
+    fprintf(stderr, "  words from 0x%08X:", g_ge_watch);
+    for (uint32_t i = 0; i < 16; i++) fprintf(stderr, " %08X", psp_read32(g_ge_watch + i * 4));
+    fprintf(stderr, "\n");
+}
+
+void psp_ge_dump_next(int lists) {
+    dumping();
+    if (!g_dump) g_dump = fopen("ge_dump.txt", "w");
+    g_dump_from = g_ge.lists + 1;
+    g_dump_to = g_dump_from + (uint64_t)(lists > 0 ? lists : 1);
+}
+
+static void dump_prim(uint32_t type, uint32_t count, const cvertex *v, uint32_t n) {
     if (g_dump_list != g_ge.lists) {
         g_dump_list = g_ge.lists;
         fprintf(g_dump, "=== list %llu\n", (unsigned long long)g_ge.lists);
@@ -645,25 +931,16 @@ static void dump_prim(uint32_t type, uint32_t count, const psp_vertex *v, uint32
         fprintf(g_dump, "  from: world 0x%08X view 0x%08X proj 0x%08X yscale 0x%08X offy 0x%08X\n",
                 g_cmd_at[GE_WORLD], g_cmd_at[GE_VIEW], g_cmd_at[GE_PROJ], g_cmd_at[GE_YSCALE],
                 g_cmd_at[GE_OFFSETY]);
-        const uint32_t from[2] = { g_cmd_at[GE_PROJ] - 64, g_cmd_at[GE_YSCALE] - 32 };
-        for (int k = 0; k < 2; k++) {
-            fprintf(g_dump, "  words at 0x%08X:", from[k]);
-            for (uint32_t i = 0; i < 24; i++) fprintf(g_dump, " %08X", psp_read32(from[k] + i * 4));
-            fprintf(g_dump, "\n");
-        }
     }
-    fprintf(g_dump, "  %s x%u vtype %06X vaddr %08X fb %08X/%u%s%s%s z%d/%d/%d tex %d %08X fmt %d %dx%d fn %d\n",
+    fprintf(g_dump, "  %s x%u vtype %06X vaddr %08X fb %08X/%u%s%s%s%s z%d/%d/%d tex %d %08X fmt %d %dx%d fn %d uvmode %d\n",
             PRIM_NAME[type & 7], count, g_ge.vtype, g_ge.vaddr, g_ge.fbp, g_ge.fbw,
             g_ds.clear ? " CLEAR" : "", g_ds.blend ? " blend" : "", VT_THROUGH(g_ge.vtype) ? " through" : "",
-            g_ds.ztest, g_ds.ztest_func, g_ds.zwrite,
-            g_ds.tex_enable, g_ds.tex_addr, g_ds.tex_fmt, g_ds.tex_w, g_ds.tex_h, g_ds.tex_func);
-    for (uint32_t i = 0; i < n && i < 4; i++) {
-        float pos[3], uv[2];
-        read_pos_uv(g_ge.vaddr + vertex_index(g_ge.vtype, i) * (uint32_t)L->stride, g_ge.vtype, L,
-                    (int)VT_THROUGH(g_ge.vtype), pos, uv);
-        fprintf(g_dump, "    v%u (%g %g %g) -> %d %d z %g w %g uv %g %g c %08X\n", i,
-                pos[0], pos[1], pos[2], v[i].x, v[i].y, v[i].z, v[i].w, v[i].u, v[i].v, v[i].rgba);
-    }
+            g_lt.enable ? " lit" : "", g_ds.ztest, g_ds.ztest_func, g_ds.zwrite,
+            g_ds.tex_enable, g_ds.tex_addr, g_ds.tex_fmt, g_ds.tex_w, g_ds.tex_h, g_ds.tex_func, g_xf.uv_mode);
+    for (uint32_t i = 0; i < n && i < 4; i++)
+        fprintf(g_dump, "    v%u clip (%g %g %g %g) -> %d %d z %g w %g uv %g %g c %08X fog %g\n", i,
+                v[i].c[0], v[i].c[1], v[i].c[2], v[i].c[3], v[i].v.x, v[i].v.y, v[i].v.z, v[i].v.w,
+                v[i].v.u, v[i].v.v, v[i].v.rgba, v[i].v.fog);
     fflush(g_dump);
 }
 
@@ -678,41 +955,37 @@ static void draw_prim(uint32_t type, uint32_t count) {
     /* Decode the whole primitive, then hand it to the backend in one call.
      * Strips and fans are order-dependent, so they are never split.
      *
-     * Format decoding stays here rather than in each backend: the stride
-     * arithmetic and component alignment are fiddly, and duplicating them per
-     * backend means every backend is wrong in its own way. Wrong once,
-     * centrally, is at least diagnosable. */
-    static psp_vertex v[65536], tri[65536 * 3];
-    static uint8_t bad[65536];
+     * Format decoding, transform, lighting and clipping stay here rather than
+     * in each backend: the stride arithmetic and component alignment are
+     * fiddly, and duplicating them per backend means every backend is wrong in
+     * its own way. Wrong once, centrally, is at least diagnosable. */
+    static cvertex v[65536];
+    static psp_vertex flat[65536], tri[65536 * 6];
     const psp_render_backend *be = psp_render_current();
 
     int behind = 0;
-    uint32_t n = 0;
-    const int dump = dumping();
-    for (; n < count; n++) {
-        const uint32_t idx = vertex_index(vtype, n);
-        const int ok = read_vertex(g_ge.vaddr + idx * (uint32_t)stride, vtype, &L, &v[n]);
-        if (!ok) break;
-        bad[n] = ok < 0;
-        if (ok < 0) behind = 1;
+    for (uint32_t n = 0; n < count; n++) {
+        read_vertex(g_ge.vaddr + vertex_index(vtype, n) * (uint32_t)stride, vtype, &L, &v[n]);
+        if (!in_front(&v[n])) behind = 1;
     }
+    if (dumping()) dump_prim(type, count, v, count);
 
-    if (dump) dump_prim(type, count, v, n, &L);
-    if (n && !behind) {
-        be->draw((int)type, v, (int)n, &g_ds);
-    } else if (n && type >= 3 && type <= 5) {
-        /* No clipping yet: drop just the triangles that touch a vertex behind
-         * the eye, rather than the whole primitive. */
+    if (count && !behind) {
+        for (uint32_t n = 0; n < count; n++) flat[n] = v[n].v;
+        be->draw((int)type, flat, (int)count, &g_ds);
+    } else if (count && type >= 3 && type <= 5) {
+        /* Some vertex is behind the near plane: clip triangle by triangle.
+         * Strips alternate winding; keeping each triangle's own vertex order
+         * keeps the provoking (last) vertex where flat shading expects it. */
         uint32_t m = 0;
-        for (uint32_t i = 0; i + 2 < n; i += (type == 3 ? 3 : 1)) {
-            uint32_t a = type == 5 ? 0 : i, b = type == 5 ? i + 1 : i + 1, c = i + 2;
-            if (type == 5 && c >= n) break;
-            if (bad[a] || bad[b] || bad[c]) { g_xf.behind++; continue; }
-            tri[m++] = v[a]; tri[m++] = v[b]; tri[m++] = v[c];
+        for (uint32_t i = 0; i + 2 < count; i += (type == 3 ? 3 : 1)) {
+            const cvertex *a = type == 5 ? &v[0] : &v[i];
+            const cvertex *b = &v[i + 1], *c = &v[i + 2];
+            m += clip_triangle(a, b, c, tri + m);
         }
-        if (m) be->draw(3, tri, (int)m, &g_ds);
+        if (m) be->draw(PSP_PRIM_TRIANGLES, tri, (int)m, &g_ds);
     } else if (behind) {
-        g_xf.behind++;
+        g_xf.behind++;             /* a sprite, line or point behind the eye */
     }
 
     /* The GE leaves its pointers just past what it consumed, and games issue
@@ -754,6 +1027,7 @@ static void run_list(ge_queue *q) {
         q->list += 4;
         g_ge.commands++;
         g_cmd_at[cmd] = q->list - 4;
+        if (g_ge_watch && q->list - 4 == g_ge_watch) ge_watch_hit(q, word);
         const uint32_t prev = q->prev;
         q->prev = word;
 
@@ -934,6 +1208,30 @@ static void run_list(ge_queue *q) {
         case GE_OFFSETY: g_xf.offy = (float)(arg & 0xFFFF) / 16.0f; break;
 
         case GE_TME:   g_ds.tex_enable = arg & 1; break;
+        case GE_LTE:   g_lt.enable = arg & 1; break;
+        case GE_LTE0: case GE_LTE0 + 1: case GE_LTE0 + 2: case GE_LTE0 + 3:
+            g_lt.on[cmd - GE_LTE0] = arg & 1;
+            break;
+        case GE_LT0: case GE_LT0 + 1: case GE_LT0 + 2: case GE_LT0 + 3:
+            g_lt.comp[cmd - GE_LT0] = (int)(arg & 3);
+            g_lt.type[cmd - GE_LT0] = (int)((arg >> 8) & 3);
+            break;
+        case GE_RNORM: g_lt.reverse_normal = arg & 1; break;
+        case GE_CMAT:  g_lt.mat_update = (int)(arg & 7); break;
+        case GE_EMC:   g_lt.emissive = arg; break;
+        case GE_DMC:   g_lt.diffuse = arg; break;
+        case GE_SMC:   g_lt.specular = arg; break;
+        case GE_SPOW:  g_lt.spec_exp = light_exponent(f24(arg)); break;
+        case GE_ALC:   g_lt.ambient = (g_lt.ambient & 0xFF000000u) | arg; break;
+        case GE_ALA:   g_lt.ambient = (g_lt.ambient & 0x00FFFFFFu) | ((arg & 0xFF) << 24); break;
+        case GE_TMAP:  g_xf.uv_mode = (int)(arg & 3); g_xf.uv_proj = (int)((arg >> 8) & 3); break;
+        case GE_TSHADE: g_xf.ls0 = (int)(arg & 3); g_xf.ls1 = (int)((arg >> 8) & 3); break;
+        case GE_TMS:   g_xf.ti = (int)(arg & 0xF); break;
+        case GE_TMATRIX: if (g_xf.ti < 12) g_xf.tgen[g_xf.ti++] = f24(arg); break;
+        case GE_FGE:   g_ds.fog = arg & 1; break;
+        case GE_FFAR:  g_xf.fog1 = f24(arg); break;
+        case GE_FDIST: g_xf.fog2 = f24(arg); break;
+        case GE_FCOL:  g_ds.fog_color = arg | 0xFF000000u; break;
         case GE_ABE:   g_ds.blend = arg & 1; break;
         case GE_ATE:   g_ds.atest = arg & 1; break;
         case GE_SHADE: g_ds.gouraud = arg & 1; break;
@@ -1016,6 +1314,30 @@ static void run_list(ge_queue *q) {
         case GE_IADDR: g_ge.iaddr = rel_addr(q, arg); break;
 
         default:
+            if (cmd >= GE_LXP0 && cmd < GE_LXP0 + 12) {
+                g_lt.pos[(cmd - GE_LXP0) / 3][(cmd - GE_LXP0) % 3] = f24(arg); break;
+            }
+            if (cmd >= GE_LXD0 && cmd < GE_LXD0 + 12) {
+                g_lt.dir[(cmd - GE_LXD0) / 3][(cmd - GE_LXD0) % 3] = f24(arg); break;
+            }
+            if (cmd >= GE_LCA0 && cmd < GE_LCA0 + 12) {
+                g_lt.att[(cmd - GE_LCA0) / 3][(cmd - GE_LCA0) % 3] = f24(arg); break;
+            }
+            if (cmd >= GE_SPOTEXP0 && cmd < GE_SPOTEXP0 + 4) {
+                g_lt.spot_exp[cmd - GE_SPOTEXP0] = light_exponent(f24(arg)); break;
+            }
+            if (cmd >= GE_SPOTCUT0 && cmd < GE_SPOTCUT0 + 4) {
+                g_lt.spot_cut[cmd - GE_SPOTCUT0] = f24(arg); break;
+            }
+            if (cmd >= GE_LAC0 && cmd < GE_LAC0 + 12) {
+                const int l = (int)(cmd - GE_LAC0) / 3;
+                switch ((cmd - GE_LAC0) % 3) {
+                case 0:  g_lt.lac[l] = arg; break;
+                case 1:  g_lt.ldc[l] = arg; break;
+                default: g_lt.lsc[l] = arg; break;
+                }
+                break;
+            }
             /* A real state command we do not decode individually. Counted --
              * and, for the first few, named. "240 commands not individually
              * decoded" hides whether the game is configuring a draw or just
