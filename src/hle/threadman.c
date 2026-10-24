@@ -1105,12 +1105,19 @@ static void hle_DelayThread(void) {
  * VTimers in between, so everything the wakeup depends on keeps running. */
 static void hle_SleepThread(void) {
     psp_thread *t = g_tls_me;
+#if PSPRECOMP_REAL_THREADS
     if (!t) { deliver_tick(); psp_ret(SCE_KERNEL_ERROR_OK); return; }
     while (t->wakeups == 0) {
         park_for(W_SLEEP, TICK_US);
         deliver_tick();
     }
     t->wakeups--;
+#else
+    /* Inline mode runs a thread to its end inside StartThread: nothing can
+     * wake it while it waits, so a sleep stays one tick long. */
+    if (t && t->wakeups) t->wakeups--;
+    deliver_tick();
+#endif
     psp_ret(SCE_KERNEL_ERROR_OK);
 }
 
