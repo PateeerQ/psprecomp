@@ -149,6 +149,9 @@ void psp_ge_init(void);
 void psp_ge_register(void);
 void psp_ge_reset(void);
 void psp_ge_dump_stats(FILE *out);
+/* Describe every primitive of the next `lists` display lists in ge_dump.txt
+ * (PSPRECOMP_GE_DUMP=N[,K] does the same from list N). */
+void psp_ge_dump_next(int lists);
 uint64_t psp_ge_command_count(void);
 uint64_t psp_ge_vertex_count(void);
 uint64_t psp_ge_pixels(void);
