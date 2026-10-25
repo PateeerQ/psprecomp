@@ -20,6 +20,9 @@
 #  define _POSIX_C_SOURCE 200809L
 #endif
 
+#if defined(__ANDROID__) && !defined(_BSD_SOURCE)
+#define _BSD_SOURCE     /* funopen (iso_open), in bionic's stdio.h */
+#endif
 #include "psprecomp/hle.h"
 
 #include <ctype.h>
