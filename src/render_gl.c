@@ -252,7 +252,7 @@ static int        g_started, g_init_result;
 
 /* The overlay and captures, guarded by g_m. */
 static uint32_t *g_ovl;
-static int       g_ovl_w, g_ovl_h, g_ovl_dirty;
+static int       g_ovl_w, g_ovl_h, g_ovl_dw, g_ovl_dh, g_ovl_dirty;
 static int       g_want_capture;
 static uint32_t  g_capture[SW * SH];
 static int       g_have_capture;
@@ -719,7 +719,9 @@ static int gl_capture(uint32_t *rgba) {
     return have ? 0 : -1;
 }
 
-void psp_render_gl_overlay(const uint32_t *rgba, int w, int h) {
+void psp_render_gl_overlay(const uint32_t *rgba, int w, int h) { psp_render_gl_overlay_scaled(rgba, w, h, w, h); }
+
+void psp_render_gl_overlay_scaled(const uint32_t *rgba, int w, int h, int dst_w, int dst_h) {
     host_mutex_lock(&g_m);
     free(g_ovl);
     g_ovl = NULL;
@@ -728,6 +730,8 @@ void psp_render_gl_overlay(const uint32_t *rgba, int w, int h) {
         memcpy(g_ovl, rgba, (size_t)w * (size_t)h * 4);
         g_ovl_w = w;
         g_ovl_h = h;
+        g_ovl_dw = dst_w > 0 ? dst_w : w;
+        g_ovl_dh = dst_h > 0 ? dst_h : h;
     }
     g_ovl_dirty = 1;
     host_mutex_unlock(&g_m);
@@ -1106,10 +1110,14 @@ static void present(const c_present *c) {
             if (!g_ovl_tex) g_ovl_tex = new_texture(1, 1, NULL, GL_NEAREST);
             glBindTexture(GL_TEXTURE_2D, g_ovl_tex);
             glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, g_ovl_w, g_ovl_h, 0, GL_RGBA, GL_UNSIGNED_BYTE, g_ovl);
+            /* Pixel for pixel stays sharp; scaled up, filtered. */
+            const GLint f = g_ovl_dw == g_ovl_w && g_ovl_dh == g_ovl_h ? GL_NEAREST : GL_LINEAR;
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, f);
+            glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, f);
         }
         g_ovl_dirty = 0;
     }
-    const int ow = g_ovl ? g_ovl_w : 0, oh = g_ovl ? g_ovl_h : 0;
+    const int ow = g_ovl ? g_ovl_dw : 0, oh = g_ovl ? g_ovl_dh : 0;
     host_mutex_unlock(&g_m);
     if (ow && g_ovl_tex) {
         glEnable(GL_BLEND);

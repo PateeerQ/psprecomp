@@ -155,6 +155,9 @@ int  psp_render_gl_start(const psp_gl_host *host, int scale);
 /* An image drawn over the top-left corner of every frame (the host's FPS
  * line), 0xAABBGGRR; NULL removes it. Any thread. */
 void psp_render_gl_overlay(const uint32_t *rgba, int w, int h);
+/* The same, drawn at dst_w x dst_h window pixels (linearly filtered): a
+ * phone's touch controls cover the screen, and are drawn at half its size. */
+void psp_render_gl_overlay_scaled(const uint32_t *rgba, int w, int h, int dst_w, int dst_h);
 
 /* Pixels written by the active backend -- the proof of life during bring-up. */
 uint64_t psp_render_pixels(void);
