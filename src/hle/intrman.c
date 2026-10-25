@@ -55,7 +55,11 @@ static uint64_t  g_vblanks_done;
 
 static long long intr_now_ns(void) {
     struct timespec ts;
+#ifdef _WIN32
     timespec_get(&ts, TIME_UTC);
+#else
+    clock_gettime(CLOCK_REALTIME, &ts);
+#endif
     return (long long)ts.tv_sec * 1000000000ll + ts.tv_nsec;
 }
 

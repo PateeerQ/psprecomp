@@ -227,7 +227,11 @@ static void hle_OutputPanned(void) {
 #if PSPRECOMP_REAL_THREADS
 static uint64_t host_now_us(void) {
     struct timespec ts;
+#ifdef _WIN32
     timespec_get(&ts, TIME_UTC);
+#else
+    clock_gettime(CLOCK_REALTIME, &ts);
+#endif
     return (uint64_t)ts.tv_sec * 1000000u + (uint64_t)ts.tv_nsec / 1000u;
 }
 static uint64_t g_audio_due_us[AUDIO_CHANNELS];
