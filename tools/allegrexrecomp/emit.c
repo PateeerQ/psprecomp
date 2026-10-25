@@ -883,7 +883,11 @@ static void emit_function(ectx *c, const a_func *fn) {
                 fprintf(f, "          psp_import_%08X();\n", in.target);
             else if (is_function(an, in.target))
                 fprintf(f, "          psp_func_%08X();\n", in.target);
-            else if (owned_by(an, in.target, owner))
+            /* Only a labelled address gets a thunk. Data decoded as code can
+             * branch-and-link to one that has none (MHFU's game_task:
+             * `bgezall` to the word after its own delay slot), which did not
+             * link; such a target is dispatched to. */
+            else if (owned_by(an, in.target, owner) && c->is_label[widx(an, in.target)])
                 fprintf(f, "          psp_at_%08X();\n", in.target);
             else
                 fprintf(f, "          psp_dispatch(0x%08Xu);\n", in.target);
