@@ -306,6 +306,9 @@ uint32_t psp_sysmem_free(void);
  * guest ever refers to them. */
 uint32_t psp_sysmem_alloc(uint32_t size, int from_high);
 void     psp_sysmem_release(uint32_t addr);
+/* A fixed range kept from the game (the host's own code and data there, e.g.
+ * built-in mods). Returns addr, or 0 when it is taken or outside the heap. */
+uint32_t psp_sysmem_reserve(uint32_t addr, uint32_t size, const char *name);
 
 #ifdef __cplusplus
 }

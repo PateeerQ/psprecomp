@@ -140,6 +140,21 @@ uint32_t psp_sysmem_alloc(uint32_t size, int from_high) {
     return addr;
 }
 
+uint32_t psp_sysmem_reserve(uint32_t addr, uint32_t size, const char *name) {
+    uint32_t rounded = (size + 0xFF) & ~0xFFu;
+    if ((addr & 0xFF) || addr < g_heap_lo || addr + rounded > g_heap_hi || overlaps(addr, rounded)) return 0;
+    mem_block *b = alloc_slot();
+    if (!b) return 0;
+    b->uid = g_next_uid++;
+    b->addr = addr;
+    b->size = rounded;
+    b->used = 1;
+    snprintf(b->name, sizeof b->name, "%s", name ? name : "reserved");
+    fprintf(stderr, "AllocPartition -> 0x%08X size %u reserved (%s)
+", addr, rounded, b->name);
+    return addr;
+}
+
 void psp_sysmem_release(uint32_t addr) {
     for (int i = 0; i < MAX_BLOCKS; i++)
         if (g_block[i].used && g_block[i].addr == addr) { g_block[i].used = 0; return; }
