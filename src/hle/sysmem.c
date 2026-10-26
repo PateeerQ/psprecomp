@@ -150,8 +150,7 @@ uint32_t psp_sysmem_reserve(uint32_t addr, uint32_t size, const char *name) {
     b->size = rounded;
     b->used = 1;
     snprintf(b->name, sizeof b->name, "%s", name ? name : "reserved");
-    fprintf(stderr, "AllocPartition -> 0x%08X size %u reserved (%s)
-", addr, rounded, b->name);
+    fprintf(stderr, "AllocPartition -> 0x%08X size %u reserved (%s)\n", addr, rounded, b->name);
     return addr;
 }
 
