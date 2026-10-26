@@ -167,6 +167,11 @@ void psp_render_gl_overlay_scaled(const uint32_t *rgba, int w, int h, int dst_w,
 void psp_render_gl_set_interpolation(int on);
 int  psp_render_gl_interpolation(void);
 
+/* The picture stretched over the whole window instead of letterboxed at the
+ * PSP's aspect (for a game told to draw wider: a widescreen hack). Any time,
+ * from any thread. */
+void psp_render_gl_set_stretch(int on);
+
 /* Pixels written by the active backend -- the proof of life during bring-up. */
 uint64_t psp_render_pixels(void);
 /* Fragments depth-tested, rejected by the test, and depth pixels cleared.
