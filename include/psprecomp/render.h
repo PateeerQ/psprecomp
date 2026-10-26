@@ -159,6 +159,14 @@ void psp_render_gl_overlay(const uint32_t *rgba, int w, int h);
  * phone's touch controls cover the screen, and are drawn at half its size. */
 void psp_render_gl_overlay_scaled(const uint32_t *rgba, int w, int h, int dst_w, int dst_h);
 
+/* In-between frames: a game that draws at 30 frames a second is shown at 60.
+ * Each frame is shown after one made from it and the frame before (every
+ * vertex of a draw both frames share halfway between them), half a frame
+ * apart. The game's own pace and logic are unchanged; what is seen is half a
+ * game frame later. Any time, from any thread. */
+void psp_render_gl_set_interpolation(int on);
+int  psp_render_gl_interpolation(void);
+
 /* Pixels written by the active backend -- the proof of life during bring-up. */
 uint64_t psp_render_pixels(void);
 /* Fragments depth-tested, rejected by the test, and depth pixels cleared.
