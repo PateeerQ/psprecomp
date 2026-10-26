@@ -1064,6 +1064,8 @@ static void capture(GLuint src_fbo, int sw, int sh, const uint32_t *pixels) {
     host_mutex_unlock(&g_m);
 }
 
+static volatile int g_stretch;      /* psp_render_gl_set_stretch */
+
 static void present(const c_present *c) {
     int ww = 0, wh = 0;
     g_host.size(g_host.user, &ww, &wh);
@@ -1096,9 +1098,10 @@ static void present(const c_present *c) {
     glClear(GL_COLOR_BUFFER_BIT);
     glUseProgram(g_blit);
     if (src_tex) {
-        /* Letterboxed at the PSP's aspect. */
+        /* Letterboxed at the PSP's aspect, or stretched over the window. */
         float w = (float)ww, h = w * SH / SW;
-        if (h > (float)wh) { h = (float)wh; w = h * SW / SH; }
+        if (g_stretch) h = (float)wh;
+        else if (h > (float)wh) { h = (float)wh; w = h * SW / SH; }
         const float x0 = ((float)ww - w) / 2, y0 = ((float)wh - h) / 2;
         glBindTexture(GL_TEXTURE_2D, src_tex);
         glUniform4i(g_b_mode, 0, 0, 0, 0);
@@ -1214,6 +1217,7 @@ static void play(gframe *f, int what, const gbuf *vtx) {
 
 static volatile int g_interp;
 void psp_render_gl_set_interpolation(int on) { g_interp = on ? 1 : 0; }
+void psp_render_gl_set_stretch(int on) { g_stretch = on ? 1 : 0; }
 int  psp_render_gl_interpolation(void) { return g_interp; }
 
 typedef struct { int32_t fb; gstate s; uint32_t first, count; } idraw;
