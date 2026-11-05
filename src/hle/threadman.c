@@ -826,6 +826,7 @@ static void *guest_thread_main(void *arg) {
      * ran before it. $sp and the o32 argument registers are the firmware's to
      * set, everything else starts at zero. */
     psp_cpu_reset();
+    psp_cpu_frames_attach();                /* its guest calls on a frame stack of its own */
     psp_cpu.r[PSP_REG_A0] = t->arglen;
     psp_cpu.r[PSP_REG_A1] = t->argp;
     thread_entry_regs(t);
