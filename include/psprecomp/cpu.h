@@ -40,8 +40,12 @@ enum {
 extern const char *const psp_reg_names[PSP_NUM_GPR];
 
 /* One guest call in flight: the return site the call expects, and the call it
- * was made from. Nodes live on the host stack of the call site that made them;
- * see psp_ra_is_jump() in dispatch.h. `ret` is 0 for a call made by the host. */
+ * was made from; see psp_ra_is_jump() in dispatch.h. `ret` is 0 for a call made
+ * by the host. Generated code takes its nodes from the thread's frame stack
+ * (psp_frame_push), not its own host stack: a local whose address is published
+ * stops the C compiler from turning a body's closing `psp_func_X(); return;`
+ * into a jump, so a guest loop that runs through two functions (MHFU's sound
+ * thread) grew the host stack every time round until it overflowed. */
 typedef struct psp_frame {
     uint32_t ret;
     struct psp_frame *prev;
@@ -65,9 +69,29 @@ typedef struct {
      * so each thread's chain moves with its context. */
     psp_frame *frame;
     uint32_t   unwind;
+    /* This thread's frame stack: the next free node and the end. */
+    psp_frame *fsp, *fend;
 } psp_cpu_state;
 
 extern psp_cpu_state psp_cpu;
+
+/* Nodes in each frame stack: deeper guest calls than this would have run the
+ * host stack out first. */
+#define PSP_FRAME_STACK 65536
+
+/* A fresh frame stack for the calling host thread (each guest thread's own). */
+void psp_cpu_frames_attach(void);
+psp_frame *psp_frame_overflow(void);
+
+static inline psp_frame *psp_frame_push(uint32_t ret) {
+    psp_frame *f = psp_cpu.fsp;
+    if (f == psp_cpu.fend) f = psp_frame_overflow();
+    else psp_cpu.fsp = f + 1;
+    f->ret = ret;
+    f->prev = psp_cpu.frame;
+    psp_cpu.frame = f;
+    return f;
+}
 
 /* Write a GPR, honouring the hardwired-zero rule for $zero. Generated code
  * calls this rather than assigning r[] directly, so a stray write to $zero
