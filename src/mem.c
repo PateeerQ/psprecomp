@@ -150,10 +150,18 @@ void *psp_mem_ptr(uint32_t addr, uint32_t size) {
 /* Reads of unmapped memory return 0 and are counted. Silently returning 0 is
  * what hardware roughly does, but a recompiled game should never be doing it
  * in a steady state — the counter is how you notice. */
+/* Main RAM first, inline: nearly every access is there (the module and VRAM
+ * cases go through psp_mem_ptr). */
+static inline void *ram_ptr(uint32_t addr, uint32_t size) {
+    const uint32_t off = (addr & PSP_ADDR_MASK) - PSP_RAM_BASE;
+    if (!g_module_size && off < PSP_RAM_SIZE && off + size <= PSP_RAM_SIZE) return psp_mem.ram + off;
+    return psp_mem_ptr(addr, size);
+}
+
 #define READ_BODY(TYPE)                              \
-    void *p = psp_mem_ptr(addr, (uint32_t)sizeof(TYPE)); \
+    void *p = ram_ptr(addr, (uint32_t)sizeof(TYPE)); \
     if (!p) { bad_access(addr, 0, (int)sizeof(TYPE)); return 0; }      \
-    note_read(addr, (uint32_t)sizeof(TYPE));         \
+    if (g_rwatch) note_read(addr, (uint32_t)sizeof(TYPE));             \
     TYPE v;                                          \
     memcpy(&v, p, sizeof v);                         \
     return v;
@@ -164,10 +172,10 @@ uint32_t psp_read32(uint32_t addr) { READ_BODY(uint32_t) }
 float    psp_read_f32(uint32_t addr) { READ_BODY(float)  }
 
 #define WRITE_BODY(TYPE)                             \
-    void *p = psp_mem_ptr(addr, (uint32_t)sizeof(TYPE)); \
+    void *p = ram_ptr(addr, (uint32_t)sizeof(TYPE)); \
     if (!p) { bad_access(addr, 1, (int)sizeof(TYPE)); return; }         \
     memcpy(p, &val, sizeof(TYPE));                               \
-    note_write(addr, (uint32_t)sizeof(TYPE));
+    if (g_wwatch) note_write(addr, (uint32_t)sizeof(TYPE));
 
 void psp_write8 (uint32_t addr, uint8_t  val) { WRITE_BODY(uint8_t)  }
 void psp_write16(uint32_t addr, uint16_t val) { WRITE_BODY(uint16_t) }
