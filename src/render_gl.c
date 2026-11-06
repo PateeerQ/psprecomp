@@ -580,6 +580,9 @@ static void rgb_of(uint32_t c, float out[3]) {
 
 static uint64_t g_draws, g_batches;
 static size_t   g_last_draw = (size_t)-1;   /* offset of this frame's last C_DRAW */
+/* How much narrower 2D is drawn while the picture is stretched over a window
+ * wider than the PSP's 480:272 (present() sets it): 1 when not. */
+static volatile float g_hud_k = 1.0f;
 
 static void gl_target(uint32_t addr, uint32_t stride, int fmt) {
     g_tgt_addr = addr;
@@ -679,6 +682,38 @@ static void gl_draw(int prim, const psp_vertex *v, int count, const psp_draw_sta
             static const GLenum EQ[6] = { GL_FUNC_ADD, GL_FUNC_SUBTRACT, GL_FUNC_REVERSE_SUBTRACT,
                                           GL_MIN, GL_MAX, GL_FUNC_ADD };
             s.beq = (int32_t)EQ[st->blend_op < 6 ? st->blend_op : 0];
+        }
+    }
+
+    /* Stretched over a wide window (psp_render_gl_set_stretch), 2D would come
+     * out wide: a 2D draw on a screen-sized target (through mode: no w) is
+     * narrowed back by g_hud_k about its own middle, so text, icons and bars
+     * keep their shape and their place (a name stays over its hunter). One as
+     * wide as the screen (a background) is left stretched, so nothing is bare. */
+    const float hk = g_hud_k;
+    if (hk < 0.999f && count > 0 && fb->w >= SW && fb->h >= SH) {
+        float x0 = v[0].fx, x1 = v[0].fx;
+        int flat2d = 1;
+        for (int i = 0; i < count && flat2d; i++) {
+            if (v[i].w != 0.0f) flat2d = 0;
+            if (v[i].fx < x0) x0 = v[i].fx;
+            if (v[i].fx > x1) x1 = v[i].fx;
+        }
+        if (flat2d && x1 - x0 < (float)SW - 8.0f) {
+            static psp_vertex *nv;
+            static int ncap;
+            if (count > ncap) {
+                psp_vertex *p = (psp_vertex *)realloc(nv, sizeof *nv * (size_t)count);
+                if (p) { nv = p; ncap = count; }
+            }
+            if (count <= ncap) {
+                const float cx = (x0 + x1) * 0.5f;
+                for (int i = 0; i < count; i++) {
+                    nv[i] = v[i];
+                    nv[i].fx = cx + (v[i].fx - cx) * hk;
+                }
+                v = nv;
+            }
         }
     }
 
@@ -1209,6 +1244,7 @@ static void present(const c_present *c) {
         /* Letterboxed at the PSP's aspect, or stretched over the window. */
         float w = (float)ww, h = w * SH / SW;
         if (g_stretch) h = (float)wh;
+        g_hud_k = g_stretch && (float)ww * SH > (float)wh * SW ? ((float)SW * (float)wh) / ((float)SH * (float)ww) : 1.0f;
         else if (h > (float)wh) { h = (float)wh; w = h * SW / SH; }
         const float x0 = ((float)ww - w) / 2, y0 = ((float)wh - h) / 2;
         glBindTexture(GL_TEXTURE_2D, src_tex);
