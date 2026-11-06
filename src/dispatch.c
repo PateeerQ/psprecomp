@@ -156,10 +156,33 @@ void psp_trace_dump(void) {
     uint64_t n = g_trace_n < TRACE_DEPTH ? g_trace_n : TRACE_DEPTH;
     fprintf(stderr, "  last %llu functions entered, newest first:\n",
             (unsigned long long)n);
-    for (uint64_t i = 1; i <= n; i++) {
-        uint64_t k = (g_trace_n - i) % TRACE_DEPTH;
-        fprintf(stderr, "    psp_func_%08X\n", g_trace[k]);
+    /* Newest first, a loop of 1-4 functions that comes round again and again
+     * printed twice and then counted (a crash report has to fit an issue). */
+#define AT(i) g_trace[(g_trace_n - (i)) % TRACE_DEPTH]
+    for (uint64_t i = 1; i <= n;) {
+        int best = 0;
+        uint64_t reps_best = 0;
+        for (int p = 1; p <= 4 && i + 2 * (uint64_t)p - 1 <= n; p++) {
+            uint64_t reps = 1;
+            while (i + (reps + 1) * (uint64_t)p - 1 <= n) {
+                int same = 1;
+                for (int q = 0; q < p && same; q++) same = AT(i + q) == AT(i + reps * (uint64_t)p + q);
+                if (!same) break;
+                reps++;
+            }
+            if (reps >= 3 && reps * (uint64_t)p > reps_best * (uint64_t)(best ? best : 1)) { best = p; reps_best = reps; }
+        }
+        if (best) {
+            for (uint64_t q = 0; q < 2 * (uint64_t)best; q++) fprintf(stderr, "    psp_func_%08X\n", AT(i + q));
+            fprintf(stderr, "    [... the %d line(s) above, %llu more times ...]\n", best,
+                    (unsigned long long)(reps_best - 2));
+            i += reps_best * (uint64_t)best;
+        } else {
+            fprintf(stderr, "    psp_func_%08X\n", AT(i));
+            i++;
+        }
     }
+#undef AT
     fprintf(stderr, "  (%llu function entries total)\n",
             (unsigned long long)g_trace_n);
 }

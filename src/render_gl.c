@@ -690,6 +690,8 @@ static void gl_draw(int prim, const psp_vertex *v, int count, const psp_draw_sta
      * narrowed back by g_hud_k about its own middle, so text, icons and bars
      * keep their shape and their place (a name stays over its hunter). One as
      * wide as the screen (a background) is left stretched, so nothing is bare. */
+    /* About the screen's middle, not each draw's own: MHFU draws text a glyph
+     * per draw and bars in pieces, which narrowed one by one left gaps. */
     const float hk = g_hud_k;
     if (hk < 0.999f && count > 0 && fb->w >= SW && fb->h >= SH) {
         float x0 = v[0].fx, x1 = v[0].fx;
@@ -707,7 +709,7 @@ static void gl_draw(int prim, const psp_vertex *v, int count, const psp_draw_sta
                 if (p) { nv = p; ncap = count; }
             }
             if (count <= ncap) {
-                const float cx = (x0 + x1) * 0.5f;
+                const float cx = (float)SW * 0.5f;
                 for (int i = 0; i < count; i++) {
                     nv[i] = v[i];
                     nv[i].fx = cx + (v[i].fx - cx) * hk;
@@ -1242,9 +1244,9 @@ static void present(const c_present *c) {
     glUseProgram(g_blit);
     if (src_tex) {
         /* Letterboxed at the PSP's aspect, or stretched over the window. */
+        g_hud_k = g_stretch && (float)ww * SH > (float)wh * SW ? ((float)SW * (float)wh) / ((float)SH * (float)ww) : 1.0f;
         float w = (float)ww, h = w * SH / SW;
         if (g_stretch) h = (float)wh;
-        g_hud_k = g_stretch && (float)ww * SH > (float)wh * SW ? ((float)SW * (float)wh) / ((float)SH * (float)ww) : 1.0f;
         else if (h > (float)wh) { h = (float)wh; w = h * SW / SH; }
         const float x0 = ((float)ww - w) / 2, y0 = ((float)wh - h) / 2;
         glBindTexture(GL_TEXTURE_2D, src_tex);
