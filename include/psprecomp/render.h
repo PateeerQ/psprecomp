@@ -177,12 +177,22 @@ void psp_render_gl_set_stretch(int on);
  * width (pixels), size, format (PSP_TPSM_*) and whether it is swizzled.
  * Returns PSP_REPLACE_NONE (decode it as usual), PSP_REPLACE_PENDING (decode
  * it as usual for now; ask again next frame, the replacement is being loaded)
- * or PSP_REPLACE_READY, with *w, *h and *rgba (malloc'd RGBA8, the backend
- * frees it) set. NULL turns it off. */
+ * or PSP_REPLACE_READY, with *w, *h and *data (malloc'd, the backend frees
+ * it) set: RGBA8 when *gl_fmt is 0, else blocks of that compressed GL format
+ * (one psp_render_gl_compressed_formats() offered), *bytes long. NULL turns
+ * it off. */
 enum { PSP_REPLACE_NONE = 0, PSP_REPLACE_PENDING = 1, PSP_REPLACE_READY = 2 };
 typedef int (*psp_texture_replacer)(uint32_t addr, int bufw, int w, int h, int fmt, int swizzled,
-                                    int *out_w, int *out_h, uint32_t **rgba);
+                                    int *out_w, int *out_h, uint32_t **data, uint32_t *gl_fmt, uint32_t *bytes);
 void psp_render_gl_set_replacer(psp_texture_replacer fn);
+
+/* The compressed texture formats the GL takes, once it is up (-1 before):
+ * PSP_GL_ASTC4x4 (GL_COMPRESSED_RGBA_ASTC_4x4_KHR, phones), PSP_GL_BC7
+ * (GL_COMPRESSED_RGBA_BPTC_UNORM, PC graphics cards). */
+enum { PSP_GL_ASTC4x4 = 1, PSP_GL_BC7 = 2 };
+#define PSP_GL_FMT_ASTC4x4 0x93B0u
+#define PSP_GL_FMT_BC7     0x8E8Cu
+int psp_render_gl_compressed_formats(void);
 
 /* Pixels written by the active backend -- the proof of life during bring-up. */
 uint64_t psp_render_pixels(void);
