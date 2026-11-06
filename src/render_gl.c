@@ -356,7 +356,11 @@ typedef struct {
     uint64_t clut_key, hash;
     uint64_t checked, used;              /* g_flip of the last hash, and of the last use */
     int      id;
+    int      repl;                       /* PSP_REPLACE_*: what the replacer said at its last upload */
 } gtex;
+
+static psp_texture_replacer volatile g_replacer;    /* psp_render_gl_set_replacer */
+void psp_render_gl_set_replacer(psp_texture_replacer fn) { g_replacer = fn; }
 
 #define MAX_TEX 1024
 static gtex g_tex[MAX_TEX];
@@ -397,7 +401,29 @@ static uint64_t clut_key(const psp_draw_state *st) {
     return hash_bytes(st->clut, 1024) ^ (params * 0x9E3779B97F4A7C15ull);
 }
 
+/* A texture pack's picture for this texture, uploaded if the host has it
+ * ready: 1 if it was. t->repl says what the host answered. */
+static int tex_replace(gtex *t, const psp_draw_state *st) {
+    psp_texture_replacer rep = g_replacer;
+    t->repl = PSP_REPLACE_NONE;
+    if (!rep) return 0;
+    int rw = 0, rh = 0;
+    uint32_t *rpx = NULL;
+    t->repl = rep(st->tex_addr, st->tex_bw, st->tex_w, st->tex_h, st->tex_fmt, st->tex_swizzle, &rw, &rh, &rpx);
+    if (t->repl != PSP_REPLACE_READY) return 0;
+    if (!rpx || rw <= 0 || rh <= 0) { free(rpx); t->repl = PSP_REPLACE_NONE; return 0; }   /* said ready, gave nothing */
+    c_tex_new *c = (c_tex_new *)cmd_add(C_TEX_NEW, sizeof *c);
+    c->id = t->id;
+    c->w = rw;
+    c->hgt = rh;
+    c->pixels = rpx;
+    g_uploads++;
+    g_upload_bytes += (uint64_t)rw * (uint64_t)rh * 4;
+    return 1;
+}
+
 static void tex_upload(gtex *t, const psp_draw_state *st) {
+    if (tex_replace(t, st)) return;
     uint32_t *px = (uint32_t *)malloc((size_t)st->tex_w * (size_t)st->tex_h * 4);
     if (!px) return;
     for (int y = 0; y < st->tex_h; y++)
@@ -450,8 +476,11 @@ static int tex_lookup(const psp_draw_state *st) {
         tex_upload(t, st);
     } else if (t->checked != g_flip || (idx != g_last_tex && span <= 32768)) {
         const uint64_t h = mem ? hash_bytes(mem, span) : t->hash;
+        const int was_checked = t->checked == g_flip;
         t->checked = g_flip;
         if (h != t->hash) { t->hash = h; tex_upload(t, st); }
+        /* A replacement still loading: asked again once a frame until it is there. */
+        else if (t->repl == PSP_REPLACE_PENDING && !was_checked) tex_replace(t, st);
     }
     t->used = g_flip;
     g_last_tex = idx;
