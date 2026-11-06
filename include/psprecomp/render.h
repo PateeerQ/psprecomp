@@ -172,6 +172,18 @@ int  psp_render_gl_interpolation(void);
  * from any thread. */
 void psp_render_gl_set_stretch(int on);
 
+/* Texture replacement (a host's texture pack, as PPSSPP's): asked on the GE's
+ * thread each time a texture is decoded from memory, with its address, buffer
+ * width (pixels), size, format (PSP_TPSM_*) and whether it is swizzled.
+ * Returns PSP_REPLACE_NONE (decode it as usual), PSP_REPLACE_PENDING (decode
+ * it as usual for now; ask again next frame, the replacement is being loaded)
+ * or PSP_REPLACE_READY, with *w, *h and *rgba (malloc'd RGBA8, the backend
+ * frees it) set. NULL turns it off. */
+enum { PSP_REPLACE_NONE = 0, PSP_REPLACE_PENDING = 1, PSP_REPLACE_READY = 2 };
+typedef int (*psp_texture_replacer)(uint32_t addr, int bufw, int w, int h, int fmt, int swizzled,
+                                    int *out_w, int *out_h, uint32_t **rgba);
+void psp_render_gl_set_replacer(psp_texture_replacer fn);
+
 /* Pixels written by the active backend -- the proof of life during bring-up. */
 uint64_t psp_render_pixels(void);
 /* Fragments depth-tested, rejected by the test, and depth pixels cleared.
