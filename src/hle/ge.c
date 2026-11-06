@@ -644,6 +644,36 @@ static int vertex_layout(uint32_t vtype, vlayout *L) {
     return L->stride;
 }
 
+/* Vertex and index reads. draw_prim maps the primitive's vertex range (and its
+ * indices) to host memory once, and these read from there: one call through
+ * psp_read*() per component was the largest part of drawing. Anything outside
+ * that range (or a range that would not map) still goes through psp_read*(). */
+static const uint8_t *g_vhost;
+static uint32_t g_vlo, g_vhi;
+static inline const uint8_t *vptr(uint32_t a, uint32_t n) {
+    return g_vhost && a >= g_vlo && a + n <= g_vhi ? g_vhost + (a - g_vlo) : NULL;
+}
+static inline uint8_t vr8(uint32_t a) { const uint8_t *p = vptr(a, 1); return p ? *p : psp_read8(a); }
+static inline uint16_t vr16(uint32_t a) {
+    const uint8_t *p = vptr(a, 2);
+    if (!p) return psp_read16(a);
+    uint16_t v; memcpy(&v, p, 2); return v;
+}
+static inline uint32_t vr32(uint32_t a) {
+    const uint8_t *p = vptr(a, 4);
+    if (!p) return psp_read32(a);
+    uint32_t v; memcpy(&v, p, 4); return v;
+}
+static inline float vrf(uint32_t a) {
+    const uint8_t *p = vptr(a, 4);
+    if (!p) return psp_read_f32(a);
+    float v; memcpy(&v, p, 4); return v;
+}
+#define psp_read8   vr8
+#define psp_read16  vr16
+#define psp_read32  vr32
+#define psp_read_f32 vrf
+
 /* Position, normal and texture coordinate of one morph record. */
 static void read_record(uint32_t addr, uint32_t vtype, const vlayout *L, int through,
                         float pos[3], float nrm[3], float uv[2]) {
@@ -860,7 +890,16 @@ static uint32_t clip_triangle(const cvertex *a, const cvertex *b, const cvertex 
 
 /* The index of vertex `i` of a primitive: from the index buffer when VTYPE
  * names one, else i itself. */
+static const uint8_t *g_ihost;          /* the index buffer in host memory, or NULL */
 static uint32_t vertex_index(uint32_t vtype, uint32_t i) {
+    if (g_ihost) {
+        switch (VT_INDEX(vtype)) {
+        case 1:  return g_ihost[i];
+        case 2:  { uint16_t v; memcpy(&v, g_ihost + i * 2, 2); return v; }
+        case 3:  { uint32_t v; memcpy(&v, g_ihost + i * 4, 4); return v; }
+        default: return i;
+        }
+    }
     switch (VT_INDEX(vtype)) {
     case 1:  return psp_read8(g_ge.iaddr + i);
     case 2:  return psp_read16(g_ge.iaddr + i * 2);
@@ -868,6 +907,10 @@ static uint32_t vertex_index(uint32_t vtype, uint32_t i) {
     default: return i;
     }
 }
+#undef psp_read8
+#undef psp_read16
+#undef psp_read32
+#undef psp_read_f32
 
 /* PSPRECOMP_GE_DUMP=N[,K]: describe every primitive of lists N..N+K-1 (K
  * defaults to 4), with the matrices whenever they change. "The scene comes out
@@ -993,11 +1036,49 @@ static void draw_prim(uint32_t type, uint32_t count) {
     static psp_vertex flat[65536], tri[65536 * 6];
     const psp_render_backend *be = psp_render_current();
 
-    int behind = 0;
-    for (uint32_t n = 0; n < count; n++) {
-        read_vertex(g_ge.vaddr + vertex_index(vtype, n) * (uint32_t)stride, vtype, &L, &v[n]);
-        if (!in_front(&v[n])) behind = 1;
+    if (count > 65536) count = 65536;
+    /* The indices, then the vertex range they reach, into host memory once. */
+    static const uint32_t isz_of[4] = { 0, 1, 2, 4 };
+    const uint32_t isize = isz_of[VT_INDEX(vtype)];
+    g_ihost = isize ? (const uint8_t *)psp_mem_ptr(g_ge.iaddr, count * isize) : NULL;
+    uint32_t lo = 0, hi = count;
+    if (isize) {
+        lo = 0xFFFFFFFFu; hi = 0;
+        for (uint32_t n = 0; n < count; n++) {
+            const uint32_t k = vertex_index(vtype, n);
+            if (k < lo) lo = k;
+            if (k + 1 > hi) hi = k + 1;
+        }
+        if (!count) lo = 0;
     }
+    g_vlo = g_ge.vaddr + lo * (uint32_t)stride;
+    g_vhi = g_ge.vaddr + hi * (uint32_t)stride;
+    g_vhost = g_vhi > g_vlo ? (const uint8_t *)psp_mem_ptr(g_vlo, g_vhi - g_vlo) : NULL;
+
+    int behind = 0;
+    if (isize && hi - lo <= 65536) {
+        /* Indexed: each vertex the indices name is transformed once, however
+         * often a strip or a list repeats it. */
+        static cvertex done[65536];
+        static uint32_t stamp[65536], gen;
+        if (++gen == 0) { memset(stamp, 0, sizeof stamp); gen = 1; }
+        for (uint32_t n = 0; n < count; n++) {
+            const uint32_t k = vertex_index(vtype, n), slot = k - lo;
+            if (stamp[slot] != gen) {
+                read_vertex(g_ge.vaddr + k * (uint32_t)stride, vtype, &L, &done[slot]);
+                stamp[slot] = gen;
+            }
+            v[n] = done[slot];
+            if (!in_front(&v[n])) behind = 1;
+        }
+    } else {
+        for (uint32_t n = 0; n < count; n++) {
+            read_vertex(g_ge.vaddr + vertex_index(vtype, n) * (uint32_t)stride, vtype, &L, &v[n]);
+            if (!in_front(&v[n])) behind = 1;
+        }
+    }
+    g_vhost = NULL;
+    g_ihost = NULL;
     psp_render_trace = dumping();
     if (dumping()) dump_prim(type, count, v, count);
 
