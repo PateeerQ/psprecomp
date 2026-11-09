@@ -477,6 +477,22 @@ static void seen_v_update(gtex *t, const psp_draw_state *st, int max_v) {
     else if (max_v > t->seen_v) t->seen_v = st->tex_h;
 }
 
+/* PSPRECOMP_TEX_RECHECK=1 (or MHFU_TEX_RECHECK=1): check every texture against
+ * memory at every use, not once a frame. For a game that rewrites a texture
+ * between draws of one frame (MHFU's font glyphs: text missing or in pieces on
+ * an AMD RX 9070 XT, issue #6, while the software renderer, which reads memory
+ * at every draw, was right). Off by default: it hashes a texture per draw. */
+static int tex_recheck(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("PSPRECOMP_TEX_RECHECK");
+        if (!e || !*e) e = getenv("MHFU_TEX_RECHECK");
+        v = e && *e && *e != '0';
+        if (v) fprintf(stderr, "render_gl: textures checked against memory at every use\n");
+    }
+    return v;
+}
+
 static int tex_lookup(const psp_draw_state *st, int max_v) {
     if (st->tex_fmt > PSP_TPSM_T32 || st->tex_w <= 0 || st->tex_h <= 0 || st->tex_bw <= 0) return 0;
     const uint64_t ck = clut_key(st);
@@ -521,7 +537,7 @@ static int tex_lookup(const psp_draw_state *st, int max_v) {
             /* Hashed over more rows now: another key, so the pack is asked again. */
             t->checked = g_flip;
             tex_upload(t, st);
-        } else if (t->checked != g_flip || (idx != g_last_tex && span <= 32768)) {
+        } else if (t->checked != g_flip || (idx != g_last_tex && span <= 32768) || tex_recheck()) {
             const uint64_t h = mem ? hash_bytes(mem, span) : t->hash;
             const int was_checked = t->checked == g_flip;
             t->checked = g_flip;
