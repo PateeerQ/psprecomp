@@ -118,9 +118,12 @@ psp_fn_t psp_lookup(uint32_t addr) {
  * single-threaded bring-up where the interesting chain was short; a module
  * that walks a table of 100 initialisers runs far deeper than that, and the
  * entry it is stuck in falls out of the window exactly when it is needed. */
-#define TRACE_DEPTH 4096
-static uint32_t g_trace[TRACE_DEPTH];
-static uint64_t g_trace_n;
+#define TRACE_DEPTH PSP_TRACE_DEPTH
+/* Exported: PSPRECOMP_TRACE_LITE's PSP_ENTER stores into it inline. */
+uint32_t psp_trace_ring[TRACE_DEPTH];
+uint64_t psp_trace_n;
+#define g_trace   psp_trace_ring
+#define g_trace_n psp_trace_n
 
 /* A one-shot hook on entry to a specific function. Bring-up repeatedly needs
  * to see the arguments to one function out of thousands, and rebuilding the
