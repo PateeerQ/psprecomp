@@ -70,6 +70,12 @@ int psp_ra_is_jump(uint32_t ra);
  * than recording it, and a short history of entered functions also shows how
  * the code arrived, not just where it was. */
 void psp_trace_enter(uint32_t addr);
+/* The ring psp_trace_enter fills. PSPRECOMP_TRACE_LITE stores into it
+ * inline (one store, no call), so a crash still names the last functions
+ * entered while the label marks and stack checks compile away. */
+#define PSP_TRACE_DEPTH 4096
+extern uint32_t psp_trace_ring[PSP_TRACE_DEPTH];
+extern uint64_t psp_trace_n;
 void psp_trace_dump(void);
 void psp_trace_reset(void);
 uint32_t psp_trace_last(void);
