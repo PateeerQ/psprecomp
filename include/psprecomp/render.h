@@ -80,6 +80,7 @@ typedef struct {
     int      clut_shift;     /* CMODE bits 2-6 */
     int      clut_mask;      /* CMODE bits 8-15 */
     int      clut_start;     /* CMODE bits 16-20, in units of 16 entries */
+    uint32_t clut_version;   /* changes whenever a CLOAD changed `clut`'s bytes */
 
     int      blend;          /* ABE */
     int      blend_src, blend_dst, blend_op;   /* ALPHA */
