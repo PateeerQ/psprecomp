@@ -408,7 +408,17 @@ static uint64_t clut_key(const psp_draw_state *st) {
     if (st->tex_fmt < PSP_TPSM_T4 || !st->clut) return 0;
     const uint64_t params = (uint64_t)st->clut_fmt | (uint64_t)st->clut_shift << 2 |
                             (uint64_t)st->clut_mask << 8 | (uint64_t)st->clut_start << 16;
-    return hash_bytes(st->clut, 1024) ^ (params * 0x9E3779B97F4A7C15ull);
+    /* Hashed again only when a CLOAD changed the palette (clut_version): it
+     * was hashed for every draw with a paletted texture. */
+    static uint64_t last_h;
+    static uint32_t last_ver;
+    static const uint8_t *last_p;
+    if (!last_p || st->clut != last_p || st->clut_version != last_ver) {
+        last_h = hash_bytes(st->clut, 1024);
+        last_p = st->clut;
+        last_ver = st->clut_version;
+    }
+    return last_h ^ (params * 0x9E3779B97F4A7C15ull);
 }
 
 /* A texture pack's picture for this texture, uploaded if the host has it
@@ -472,13 +482,16 @@ static int tex_lookup(const psp_draw_state *st, int max_v) {
     const uint64_t ck = clut_key(st);
     gtex *t = NULL;
     int idx = -1;
-    for (int i = 0; i < g_ntex; i++) {
-        gtex *e = &g_tex[i];
-        if (e->addr == st->tex_addr && e->fmt == st->tex_fmt && e->w == st->tex_w && e->h == st->tex_h &&
-            e->bw == st->tex_bw && e->swizzle == st->tex_swizzle && e->clut_key == ck) {
-            t = e; idx = i; break;
-        }
-    }
+#define TEX_SAME(e) ((e)->addr == st->tex_addr && (e)->fmt == st->tex_fmt && (e)->w == st->tex_w && \
+                     (e)->h == st->tex_h && (e)->bw == st->tex_bw && (e)->swizzle == st->tex_swizzle && \
+                     (e)->clut_key == ck)
+    if (g_last_tex >= 0 && g_last_tex < g_ntex && TEX_SAME(&g_tex[g_last_tex])) {   /* most draws: the previous one's */
+        idx = g_last_tex;
+        t = &g_tex[idx];
+    } else
+        for (int i = 0; i < g_ntex; i++)
+            if (TEX_SAME(&g_tex[i])) { t = &g_tex[i]; idx = i; break; }
+#undef TEX_SAME
     const uint32_t span = tex_span(st);
     const uint8_t *mem = (const uint8_t *)psp_mem_ptr(st->tex_addr, span);
     if (!t) {
