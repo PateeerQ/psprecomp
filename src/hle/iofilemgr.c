@@ -418,10 +418,28 @@ static uint32_t do_read(io_file *h, uint32_t dst, uint32_t size) {
     return (uint32_t)got;
 }
 
+/* PSPRECOMP_UMD_DELAY=<MB/s>: a read from the disc holds its thread as long as
+ * a UMD would take (plus 1 ms a call), as PPSSPP does; other threads run
+ * meanwhile. Unset: reads are instant. For games whose logic depends on how
+ * long loading takes. */
+static double umd_rate(void) {
+    static double r = -1;
+    if (r < 0) {
+        const char *e = getenv("PSPRECOMP_UMD_DELAY");
+        r = e ? atof(e) : 0;
+        if (r > 0) fprintf(stderr, "io: disc reads take UMD time (%.1f MB/s)\n", r);
+    }
+    return r;
+}
+
 static void hle_Read(void) {
     io_file *h = fd_arg();
     if (!h) { psp_ret(ERR_BADF); return; }
-    psp_ret(do_read(h, psp_arg(1), psp_arg(2)));
+    const uint32_t got = do_read(h, psp_arg(1), psp_arg(2));
+    const double rate = h->on_disc ? umd_rate() : 0;
+    if (rate > 0 && got && got < 0x80000000u && !psp_threadman_intr_disabled())
+        psp_threadman_delay(1000u + (uint64_t)((double)got / rate));   /* bytes / (MB/s) = us */
+    psp_ret(got);
 }
 
 static void hle_Write(void) {
