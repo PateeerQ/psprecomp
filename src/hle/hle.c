@@ -129,6 +129,7 @@ static uint64_t g_unimpl_total;
 static uint64_t g_unimpl_logged;
 
 void psp_hle_call(uint32_t nid) {
+    if (psp_loop_pending) psp_loop_poll();   /* a GE callback from the GE thread: before the call, like an interrupt */
     if (nid == 0x237DBD4Fu)
         fprintf(stderr, "psp_hle_call ENTERED for 0x237DBD4F (%d entries registered)\n", g_count);
     for (int i = 0; i < g_count; i++) {
