@@ -81,6 +81,13 @@ void psp_trace_reset(void);
 uint32_t psp_trace_last(void);
 void psp_trace_watch(uint32_t addr, void (*fn)(uint32_t));
 void psp_trace_loop(uint32_t addr);
+/* An interrupt waits (a GE callback raised by the GE thread): the generated
+ * code checks this at every loop's back edge (PSP_LOOP), so a guest spinning
+ * on a flag the callback sets gets it, as on the hardware. psp_loop_poll runs
+ * the hook the GE registered. */
+extern volatile int psp_loop_pending;
+void psp_loop_poll(void);
+void psp_set_loop_poll(void (*fn)(void));
 void psp_trace_mark(uint32_t addr);
 void psp_trace_sp(uint32_t fn, uint32_t sp_in, uint32_t sp_out);
 /* The same observation at a transfer that ends a body, where the expected
