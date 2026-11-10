@@ -300,7 +300,15 @@ void psp_dispatch_reset(void) {
 static uint32_t g_loop_addr;
 static uint64_t g_loop_hits;
 
-void psp_trace_loop(uint32_t addr) { g_loop_addr = addr; g_loop_hits++; }
+volatile int psp_loop_pending;
+static void (*g_loop_poll)(void);
+void psp_set_loop_poll(void (*fn)(void)) { g_loop_poll = fn; }
+void psp_loop_poll(void) { if (g_loop_poll) g_loop_poll(); }
+
+void psp_trace_loop(uint32_t addr) {
+    g_loop_addr = addr; g_loop_hits++;
+    if (psp_loop_pending) psp_loop_poll();
+}
 uint32_t psp_trace_loop_addr(void) { return g_loop_addr; }
 uint64_t psp_trace_loop_hits(void) { return g_loop_hits; }
 
