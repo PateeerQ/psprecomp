@@ -144,6 +144,7 @@ typedef ptrdiff_t GLsizeiptr;
     X(void,   CompressedTexImage2D, (GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei, const void *)) \
     X(void,   GetIntegerv, (GLenum, GLint *)) \
     X(const unsigned char *, GetStringi, (GLenum, GLuint)) \
+    X(const unsigned char *, GetString, (GLenum)) \
     X(void,   TexParameteri, (GLenum, GLenum, GLint)) \
     X(void,   GenFramebuffers, (GLsizei, GLuint *)) \
     X(void,   DeleteFramebuffers, (GLsizei, const GLuint *)) \
@@ -625,6 +626,18 @@ static void gl_target(uint32_t addr, uint32_t stride, int fmt) {
  * 1x and in pieces at 5x (issue #6; the software renderer was right). A nudge of
  * 1/256 texel puts every sample inside the texel the PSP reads. PSPRECOMP_UV_NUDGE=0
  * (or MHFU_UV_NUDGE=0) turns it off. */
+/* PSPRECOMP_TEX_INPLACE=1 (or MHFU_TEX_INPLACE=1): re-upload a changed texture into
+ * its own GL object (the old way) instead of a new one (issue #6). */
+static int tex_inplace(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("PSPRECOMP_TEX_INPLACE");
+        if (!e || !*e) e = getenv("MHFU_TEX_INPLACE");
+        v = e && *e && *e != '0';
+    }
+    return v;
+}
+
 static float uv_nudge(void) {
     static float v = -1.0f;
     if (v < 0.0f) {
@@ -1091,6 +1104,12 @@ static GLuint new_compressed(int w, int h, GLenum fmt, GLsizei bytes, const void
 static int setup(void) {
     if (g_host.init(g_host.user) != 0) return -1;
     if (load_gl() != 0) return -1;
+    {   /* which GPU and driver: for reports like issue #6 (AMD only) */
+        const char *vn = (const char *)glGetString(0x1F00 /* GL_VENDOR */);
+        const char *rn = (const char *)glGetString(0x1F01 /* GL_RENDERER */);
+        const char *vs = (const char *)glGetString(0x1F02 /* GL_VERSION */);
+        fprintf(stderr, "render_gl: %s / %s / %s\n", vn ? vn : "?", rn ? rn : "?", vs ? vs : "?");
+    }
     find_formats();
     g_prog = program(VS_DRAW, FS_DRAW);
     g_blit = program(VS_BLIT, FS_BLIT);
@@ -1366,7 +1385,13 @@ static void play(gframe *f, int what, const gbuf *vtx) {
                 if (g_rtex[c->id]) glDeleteTextures(1, &g_rtex[c->id]);
                 g_rtex[c->id] = new_compressed(c->w, c->hgt, (GLenum)c->gl_fmt, (GLsizei)c->bytes, c->pixels);
             } else if (!g_rtex[c->id]) g_rtex[c->id] = new_texture(c->w, c->hgt, c->pixels, GL_NEAREST);
-            else {
+            else if (!tex_inplace()) {
+                /* a texture rewritten between draws of one frame (MHFU's font glyphs) gets a
+                 * new GL object: re-specifying one that earlier draws of the batch still
+                 * sample is legal GL, but issue #6 (text gone on AMD only) points at it */
+                glDeleteTextures(1, &g_rtex[c->id]);
+                g_rtex[c->id] = new_texture(c->w, c->hgt, c->pixels, GL_NEAREST);
+            } else {
                 glBindTexture(GL_TEXTURE_2D, g_rtex[c->id]);
                 glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA8, c->w, c->hgt, 0, GL_RGBA, GL_UNSIGNED_BYTE, c->pixels);
             }
