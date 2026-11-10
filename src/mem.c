@@ -33,9 +33,19 @@ static void note_write(uint32_t addr, uint32_t width) {
         memcpy(&now, q, 4);
         if (now != g_wwatch_val) return;
     }
-    if (g_whits++ < 8)
-        fprintf(stderr, "write%u to 0x%08X (watch 0x%08X) from fn 0x%08X, ra 0x%08X sp 0x%08X\n",
-                width * 8, addr, g_wwatch, psp_trace_last(), psp_cpu.r[31], psp_cpu.r[29]);}
+    if (g_whits++ < 40) {
+        uint32_t now = 0;
+        void *q = psp_mem_ptr(g_wwatch & ~3u, 4);
+        if (q) memcpy(&now, q, 4);
+        fprintf(stderr, "write%u to 0x%08X (watch 0x%08X, word now 0x%08X) from fn 0x%08X, ra 0x%08X sp 0x%08X\n",
+                width * 8, addr, g_wwatch, now, psp_trace_last(), psp_cpu.r[31], psp_cpu.r[29]);
+        /* the guest call stack: the return sites the recompiled calls expect */
+        fprintf(stderr, "    calls:");
+        int k = 0;
+        for (const psp_frame *f = psp_cpu.frame; f && k < 16; f = f->prev, k++) fprintf(stderr, " 0x%08X", f->ret);
+        fprintf(stderr, "\n");
+    }
+}
 
 /* Watch reads of one address: "which code looks at this" is the question when
  * a value is right in memory and the game still does not act on it. A field
