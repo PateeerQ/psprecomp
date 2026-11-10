@@ -163,6 +163,12 @@ uint64_t psp_ge_pixels(void);
  * every wait point. */
 void     psp_ge_deliver_pending(void);
 uint64_t psp_ge_callbacks_run(void);
+/* PSPRECOMP_GE_THREAD=1: the lists run on a thread of their own. Waits until
+ * that thread has nothing it can run (no-op inline); sceDisplaySetFrameBuf
+ * calls it, so the frame shown is drawn. The stats: waits that blocked, and
+ * how long they blocked in all. */
+void     psp_ge_wait_idle(void);
+void     psp_ge_async_stats(uint64_t *waits, uint64_t *wait_us);
 
 void psp_sas_init(void);
 void psp_sas_register(void);
