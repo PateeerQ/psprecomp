@@ -92,6 +92,12 @@ static int host_thread_create(host_thread *thread, size_t stack,
     *thread = (HANDLE)handle;
     return 0;
 }
+/* Logical CPUs the process may run on (at least 1). */
+static inline int host_cpu_count(void) {
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return si.dwNumberOfProcessors > 0 ? (int)si.dwNumberOfProcessors : 1;
+}
 static void host_thread_join(host_thread thread) {
     if (WaitForSingleObject(thread, INFINITE) != WAIT_OBJECT_0) host_thread_error();
     if (!CloseHandle(thread)) host_thread_error();
@@ -141,5 +147,11 @@ static int host_thread_create(host_thread *thread, size_t stack,
     return rc;
 }
 static void host_thread_join(host_thread thread) { if (pthread_join(thread, NULL)) host_thread_error(); }
+#include <unistd.h>
+/* Logical CPUs online (at least 1). */
+static inline int host_cpu_count(void) {
+    const long n = sysconf(_SC_NPROCESSORS_ONLN);
+    return n > 0 ? (int)n : 1;
+}
 #endif
 #endif
