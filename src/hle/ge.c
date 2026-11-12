@@ -1644,8 +1644,14 @@ static void *ge_worker(void *arg) {
 
 static int async_on(void) {
     if (g_async < 0) {
+        /* "1" on, "auto" on with 4 or more CPUs: with fewer, the worker,
+         * the guest (which spins on the GE's finish flag) and the render
+         * thread fight over the same cores, and lists inline are faster. */
         const char *e = getenv("PSPRECOMP_GE_THREAD");
-        g_async = e && e[0] == '1';
+        const int cpus = host_cpu_count();
+        g_async = e && (e[0] == '1' || (!strcmp(e, "auto") && cpus >= 4));
+        if (e && !strcmp(e, "auto") && !g_async)
+            fprintf(stderr, "psprecomp: %d CPU(s): GE lists run inline\n", cpus);
         if (g_async) {
             host_thread t;
             if (host_thread_create(&t, 8u << 20, ge_worker, NULL) != 0) {
