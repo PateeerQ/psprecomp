@@ -81,6 +81,8 @@ typedef struct {
     int      clut_mask;      /* CMODE bits 8-15 */
     int      clut_start;     /* CMODE bits 16-20, in units of 16 entries */
     uint32_t clut_version;   /* changes whenever a CLOAD changed `clut`'s bytes */
+    uint32_t clut_load_bytes;/* bytes the last CLOAD loaded (PPSSPP's clutTotalBytes_) */
+    uint32_t clut_max_bytes; /* the most any CLOAD loaded (clutMaxBytes_): texture packs' CLUT hash */
 
     int      blend;          /* ABE */
     int      blend_src, blend_dst, blend_op;   /* ALPHA */
@@ -181,9 +183,13 @@ void psp_render_gl_set_stretch(int on);
  * or PSP_REPLACE_READY, with *w, *h and *data (malloc'd, the backend frees
  * it) set: RGBA8 when *gl_fmt is 0, else blocks of that compressed GL format
  * (one psp_render_gl_compressed_formats() offered), *bytes long. NULL turns
- * it off. */
+ * it off. `dim` is TSIZE0's log2 sizes (h << 8 | w), and a paletted texture
+ * comes with the CLUT bytes PPSSPP hashes for its key (`clut`, `clut_bytes`:
+ * the last load plus the start offset, at most the largest load; NULL, 0 for
+ * the others). */
 enum { PSP_REPLACE_NONE = 0, PSP_REPLACE_PENDING = 1, PSP_REPLACE_READY = 2 };
 typedef int (*psp_texture_replacer)(uint32_t addr, int bufw, int w, int h, int fmt, int swizzled,
+                                    uint32_t dim, const uint8_t *clut, uint32_t clut_bytes,
                                     int *out_w, int *out_h, uint32_t **data, uint32_t *gl_fmt, uint32_t *bytes);
 void psp_render_gl_set_replacer(psp_texture_replacer fn);
 
