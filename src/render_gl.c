@@ -463,8 +463,20 @@ static int tex_replace(gtex *t, const psp_draw_state *st) {
     int rw = 0, rh = 0;
     uint32_t *rpx = NULL, gl_fmt = 0, bytes = 0;
     const int hh = t->seen_v > 0 && t->seen_v < st->tex_h ? t->seen_v : st->tex_h;
-    t->repl = rep(st->tex_addr, st->tex_bw, st->tex_w, hh, st->tex_fmt, st->tex_swizzle, &rw, &rh, &rpx,
-                  &gl_fmt, &bytes);
+    uint32_t lw = 0, lh = 0;
+    while (lw < 15 && (1 << lw) < st->tex_w) lw++;
+    while (lh < 15 && (1 << lh) < st->tex_h) lh++;
+    const uint8_t *clut = NULL;
+    uint32_t clut_bytes = 0;
+    if (st->tex_fmt >= PSP_TPSM_T4 && st->tex_fmt <= PSP_TPSM_T32 && st->clut) {
+        /* PPSSPP's UpdateCurrentClut: the last load plus the start's bytes, at most the largest load. */
+        const uint32_t base = (uint32_t)st->clut_start * 16u * (st->clut_fmt == 3 ? 4u : 2u);
+        clut_bytes = st->clut_load_bytes + base;
+        if (clut_bytes > st->clut_max_bytes) clut_bytes = st->clut_max_bytes;
+        clut = st->clut;
+    }
+    t->repl = rep(st->tex_addr, st->tex_bw, st->tex_w, hh, st->tex_fmt, st->tex_swizzle, lh << 8 | lw, clut,
+                  clut_bytes, &rw, &rh, &rpx, &gl_fmt, &bytes);
     if (t->repl != PSP_REPLACE_READY) return 0;
     if (!rpx || rw <= 0 || rh <= 0 || (gl_fmt && !bytes)) {                          /* said ready, gave nothing */
         free(rpx);
@@ -717,6 +729,27 @@ static int tex_inplace(void) {
     return v;
 }
 
+/* Issue #6 experiments (AMD RX 9070 XT, driver 26.10: MHFU's font text, drawn
+ * through mode with linear filtering and an alpha test "alpha != 0", loses its
+ * thin strokes). PSPRECOMP_TEX_FILTER=nearest (or MHFU_TEX_FILTER) samples 2D
+ * draws nearest; PSPRECOMP_ATEST=0 (or MHFU_ATEST) skips the alpha test in the
+ * shader (blending still hides alpha 0). Both off by default. */
+static int env_flag(const char *a, const char *b, const char *on) {
+    const char *e = getenv(a);
+    if (!e || !*e) e = getenv(b);
+    return e && *e && !strcmp(e, on);
+}
+static int tex_filter_nearest(void) {
+    static int v = -1;
+    if (v < 0) v = env_flag("PSPRECOMP_TEX_FILTER", "MHFU_TEX_FILTER", "nearest");
+    return v;
+}
+static int atest_off(void) {
+    static int v = -1;
+    if (v < 0) v = env_flag("PSPRECOMP_ATEST", "MHFU_ATEST", "0");
+    return v;
+}
+
 static float uv_nudge(void) {
     static float v = -1.0f;
     if (v < 0.0f) {
@@ -815,11 +848,12 @@ static void gl_draw(int prim, const psp_vertex *v, int count, const psp_draw_sta
                 s.mode[1] = st->tex_func;
                 s.min_f = st->tex_min_linear ? GL_LINEAR : GL_NEAREST;
                 s.mag_f = st->tex_mag_linear ? GL_LINEAR : GL_NEAREST;
+                if (count > 0 && v[0].w <= 0.0f && tex_filter_nearest()) s.min_f = s.mag_f = GL_NEAREST;   /* 2D */
                 rgb_of(st->tex_env, s.env);
             }
         }
         if (st->fog) { s.mode[0] |= MODE_FOG; rgb_of(st->fog_color, s.fogc); }
-        if (st->atest) {
+        if (st->atest && !atest_off()) {
             s.mode[0] |= MODE_ATEST;
             s.mode[2] = st->atest_func;
             s.mode[3] = (st->atest_ref & 0xFF) | (st->atest_mask & 0xFF) << 8;
@@ -1208,6 +1242,9 @@ static int setup(void) {
         fprintf(stderr, "render_gl: %s / %s / %s\n", vn ? vn : "?", rn ? rn : "?", vs ? vs : "?");
         fprintf(stderr, "render_gl: depth inset %s, uv nudge %s\n", z_inset() ? "on" : "off",
                 uv_nudge() > 0.0f ? "on" : "off");
+        if (tex_filter_nearest() || atest_off())
+            fprintf(stderr, "render_gl: 2D filter %s, alpha test %s\n", tex_filter_nearest() ? "nearest" : "game's",
+                    atest_off() ? "off" : "on");
     }
     find_formats();
     g_prog = program(VS_DRAW, FS_DRAW);
