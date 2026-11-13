@@ -307,7 +307,7 @@ static uint64_t g_unsupported;     /* vertices in a format we do not read */
  * is decoded from where one value spans two commands. */
 static psp_draw_state g_ds;
 static uint32_t g_tbp, g_tbw, g_cbp, g_psm;
-static uint8_t  g_clut[1024];      /* the GE's CLUT cache, filled by CLOAD */
+static uint8_t  g_clut[2048];      /* the GE's CLUT cache, filled by CLOAD (up to 63 blocks of 32) */
 /* A vertex with no colour takes the material colour: AMC's RGB, AMA's alpha. */
 static uint32_t g_material = 0xFFFFFFFFu;
 
@@ -1088,6 +1088,9 @@ static void dump_prim(uint32_t type, uint32_t count, const cvertex *v, uint32_t 
             g_ds.clear ? " CLEAR" : "", g_ds.blend ? " blend" : "", VT_THROUGH(g_ge.vtype) ? " through" : "",
             g_lt.enable ? " lit" : "", g_ds.ztest, g_ds.ztest_func, g_ds.zwrite,
             g_ds.tex_enable, g_ds.tex_addr, g_ds.tex_fmt, g_ds.tex_w, g_ds.tex_h, g_ds.tex_func, g_xf.uv_mode);
+    fprintf(g_dump, "    atest %d fn %d ref %02X mask %02X  filter min %s mag %s  texalpha %d\n", g_ds.atest,
+            g_ds.atest_func, g_ds.atest_ref & 0xFF, g_ds.atest_mask & 0xFF, g_ds.tex_min_linear ? "linear" : "nearest",
+            g_ds.tex_mag_linear ? "linear" : "nearest", g_ds.tex_alpha);
     /* Each distinct texture once, decoded as the rasterizer sees it. */
     static uint32_t seen[64];
     static int nseen;
@@ -1507,6 +1510,10 @@ static void run_list(ge_queue *q) {
             } else {
                 for (uint32_t i = 0; i < n; i++) g_clut[i] = psp_read8(g_cbp + i);
                 g_ds.clut_version++;
+            }
+            if (n) {                                      /* PPSSPP keeps both for its CLUT hash */
+                g_ds.clut_load_bytes = n;
+                if (n > g_ds.clut_max_bytes) g_ds.clut_max_bytes = n;
             }
             break;
         }
